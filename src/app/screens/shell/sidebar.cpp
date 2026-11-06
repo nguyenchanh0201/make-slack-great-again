@@ -526,8 +526,19 @@ public:
             }
         }
         add<View>()->style().flex(1);
-        // The badge and the huddle pill (in that order, last) are made the
-        // first time they show: most rows never need either.
+        // DMs, group DMs and apps: "×" on hover closes (hides) the
+        // conversation, as the menu's Leave does; its next message brings it back.
+        if (cv.isDirect() && !sb._ctx.backend.isAgentSession(c)) {
+            close = add<HeaderButton>(Icon::X, tr("Close"));
+            close->style().margins(6, 0, 0, 0);
+            close->setVisible(false);
+            close->onClick = [this] {
+                if (sidebar._menus)
+                    sidebar._menus->run(Menus::kLeave, conv);
+            };
+        }
+        // The badge and the huddle pill are made the first time they show:
+        // most rows never need either.
         onClick = [this] {
             if (sidebar._ctx.openConversation)
                 sidebar._ctx.openConversation(conv);
@@ -639,6 +650,12 @@ public:
         refreshPresence();
         if (count > 0 || dot || badge)
             makeBadge()->set(count, count == 0 && dot);
+        // Hovered, the "×" takes the badge's place.
+        const bool closing = close && hovered();
+        if (close)
+            close->setVisible(closing);
+        if (closing && badge)
+            badge->setVisible(false);
         // A live huddle: who is in it and how many (no count before anyone joined).
         const bool live = caps.huddles && cv.huddleActive;
         if (live || huddle)
@@ -665,6 +682,7 @@ public:
     Label         *you     = nullptr;
     CountBadge    *badge   = nullptr;
     HuddlePill    *huddle  = nullptr;
+    HeaderButton  *close   = nullptr; // DMs and apps: shown on hover
     SectionHeader *section = nullptr;
     size_t         base    = 0; // its place in the section as listed (before the sort)
     bool           unread = false, dot = false;
@@ -1716,6 +1734,14 @@ bool Sidebar::joinHuddle(ConvRef conv) {
     if (!r || !r->huddle || !r->huddle->visible())
         return false;
     r->huddle->onClick();
+    return true;
+}
+
+bool Sidebar::closeRow(ConvRef conv) {
+    ConvRow *r = rowFor(conv);
+    if (!r || !r->close)
+        return false;
+    r->close->onClick();
     return true;
 }
 

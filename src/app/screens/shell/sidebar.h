@@ -182,6 +182,8 @@ public:
     bool activityUnread() const; // the Activity entry is bright (Store::unreadActivity)
     // A click on a row's huddle pill (tests): false when it shows none.
     bool joinHuddle(model::ConvRef conv);
+    // A click on a row's close button (tests): false when it has none.
+    bool closeRow(model::ConvRef conv);
     bool scheduledShown() const; // tests
     // The Team section's rows, top to bottom (tests): role ids.
     std::vector<std::string> teammates() const;

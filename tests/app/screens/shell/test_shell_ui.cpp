@@ -307,6 +307,27 @@ TEST("sidebar: bot DMs live under Agents & apps, which Settings can hide") {
     );
 }
 
+TEST("sidebar: a DM or app row's close button hides it; channels have none") {
+    Harness       h;
+    const ConvRef jonas = h.conv("D0JONAS");
+    CHECK_FALSE(h.sidebar().closeRow(h.conv("C0RANDOM"))); // leaving a channel is the menu's
+    CHECK(h.store.conversation(h.conv("C0RANDOM")).member);
+    REQUIRE(h.sidebar().closeRow(jonas));
+    pump();
+    CHECK_FALSE(h.store.conversation(jonas).member);
+    CHECK_FALSE(h.sidebar().rowState(jonas).exists);
+    Conversation c;
+    c.id     = "D0BOT";
+    c.kind   = ConvKind::Dm;
+    c.dmUser = h.store.findUser("U0DEPLOY");
+    h.store.addConversation(std::move(c));
+    h.sidebar().rebuild();
+    const ConvRef bot = h.conv("D0BOT");
+    REQUIRE(h.sidebar().closeRow(bot));
+    pump();
+    CHECK_FALSE(h.sidebar().rowState(bot).exists);
+}
+
 TEST("sidebar: a DM whose peer was deactivated is not listed") {
     Harness    h;
     // A reinstalled app leaves its old, deactivated bot users behind, each

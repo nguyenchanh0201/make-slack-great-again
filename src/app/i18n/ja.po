@@ -958,7 +958,7 @@ msgstr "ブラウザで開く"
 msgid "More actions"
 msgstr "その他の操作"
 
-#: src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp
+#: src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp src/app/screens/shell/sidebar.cpp
 msgid "Close"
 msgstr "閉じる"
 
