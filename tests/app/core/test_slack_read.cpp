@@ -4,6 +4,7 @@
 // messages, rate limits, auth errors, the Enterprise Grid fallback, and the
 // JSON mappers. Nothing here talks to the real Slack. Delays are compressed
 // (MSGA_SLACK_TEST_SPEEDUP) so the 5 s poll runs every 50 ms.
+#include "app/slack/rtm_presence.h"
 #include "app/slack/slack_backend.h"
 #include "app/slack/slack_json.h"
 #include "support/fake_slack_server.h"
@@ -62,9 +63,10 @@ struct Log {
 // The workspace every connect test starts from: two pages of users, two of
 // conversations (a channel, a muted channel, DMs incl. a Slack Connect peer
 // users.list never lists, a group DM known only by its mpdm- name).
-// rtm.connect refused: a polling session workspace (no live RTM link).
+// Env refuses rtm.connect with it (kNoRtm): a polling session workspace
+// unless the test asks for the live RTM link.
+const char *kNoRtm     = R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})";
 const char *kWorkspace = R"({
- "rtm.connect": {"ok": false, "error": "not_allowed_token_type"},
  "auth.test": {"ok": true, "user_id": "UME", "team_id": "T1", "team": "Lumen",
                "url": "https://lumen.slack.com/"},
  "users.list": {"ok": true, "members": [
@@ -111,11 +113,14 @@ struct Env {
     std::unique_ptr<slack::SlackBackend> be;
     std::string                          lostAuth;
 
-    explicit Env(const char *table = kWorkspace, bool session = true) {
+    // live: kWorkspace with rtm.connect allowed (a session workspace's RTM link).
+    explicit Env(const char *table = kWorkspace, bool session = true, bool live = false) {
         base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", "100");
         ctl("POST", "/_ctl/reset");
         if (table)
             set(table);
+        if (table == kWorkspace && !live)
+            set(kNoRtm);
         slack::Credentials cr;
         cr.token       = session ? "xoxc-test" : "xoxp-test";
         cr.cookie      = session ? "xoxd-test" : "";
@@ -506,6 +511,116 @@ TEST("slack read: hidden, the open chat polls slowly, client.counts brings it fo
     REQUIRE(pumpUntil(
         [&] { return Log().count("users.getPresence", "user", "UMIRA") > presence; }, 1000
     ));
+}
+
+// ── Live (a session workspace's RTM link up): polling is a safety net ──────
+
+// The live Env's RTM link up, the open chat C1 settled into its cadence.
+static bool liveOpen(Env &e) {
+    if (!e.connect() || !pumpUntil([&] { return e.be->hasRealtimePush(); }, 5000))
+        return false;
+    const ConvRef c = e.conv("C1");
+    if (!e.history(c, 0))
+        return false;
+    e.be->setActiveConversation(c, 0);
+    fakeslack::pumpFor(200);
+    return true;
+}
+
+// conversations.history calls for anything but `open`.
+static int otherHistory(const Log &l, std::string_view open) {
+    int n = 0;
+    for (json::Value r : l.doc.root())
+        n += r["method"].str() == "conversations.history" && r["form"]["channel"].str() != open;
+    return n;
+}
+
+TEST("live poll: while live only the 60 s safety polls run") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, true, /*live=*/true);
+    REQUIRE(liveOpen(e));
+    const Log before;
+    fakeslack::pumpFor(1800); // 3 min
+    const Log l;
+    CHECK(e.be->hasRealtimePush());
+    CHECK(l.count("client.counts") == before.count("client.counts"));
+    CHECK(
+        l.count("subscriptions.thread.getView") + l.count("subscriptions.thread.getTimestamps") ==
+        before.count("subscriptions.thread.getView") +
+            before.count("subscriptions.thread.getTimestamps")
+    );
+    CHECK(l.count("users.conversations") == before.count("users.conversations"));
+    const int c1 = l.count("conversations.history", "channel", "C1") -
+                   before.count("conversations.history", "channel", "C1");
+    CHECK(c1 >= 2 && c1 <= 4);
+    CHECK(otherHistory(l, "C1") == otherHistory(before, "C1"));
+}
+
+TEST("live poll: drop falls back to fast polling, hello backfills once") {
+    if (!haveServer())
+        return;
+    Env                        e(kWorkspace, true, /*live=*/true);
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 2'000; // stays down long enough to see the fallback
+    e.be->presenceLinkForTest()->setTimingForTest(t);
+    REQUIRE(liveOpen(e));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return !e.be->hasRealtimePush(); }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+    // Down: the open chat at 5 s (50 ms here), client.counts back.
+    const Log down;
+    fakeslack::pumpFor(400);
+    const Log polled;
+    CHECK(
+        polled.count("conversations.history", "channel", "C1") -
+            down.count("conversations.history", "channel", "C1") >=
+        4
+    );
+    CHECK(polled.count("client.counts") > down.count("client.counts"));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    // The hello after the gap: one roster reload, then the slow cadence.
+    REQUIRE(pumpUntil([&] { return e.be->hasRealtimePush(); }, 5000));
+    fakeslack::pumpFor(300);
+    const Log back;
+    CHECK(
+        back.count("users.conversations", "cursor", "") -
+            polled.count("users.conversations", "cursor", "") ==
+        1
+    );
+    fakeslack::pumpFor(1300);
+    const Log l;
+    CHECK(l.count("client.counts") == back.count("client.counts"));
+    CHECK(
+        l.count("conversations.history", "channel", "C1") -
+            back.count("conversations.history", "channel", "C1") <=
+        3
+    );
+}
+
+TEST("live poll: a background find does not reconnect the socket") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, true, /*live=*/true);
+    // C1 open, D1 the background sweep's only other conversation.
+    set(R"({"users.conversations": {"ok": true, "channels": [
+              {"id": "C1", "name": "general", "is_channel": true, "is_member": true},
+              {"id": "D1", "is_im": true, "user": "UMIRA"}],
+            "response_metadata": {"next_cursor": ""}}})");
+    REQUIRE(liveOpen(e));
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history", "channel", "D1") > 0; }));
+    const int rtm = Log().count("rtm.connect");
+    set(R"({"conversations.history?channel=D1": {"ok": true, "has_more": false, "messages": [
+              {"type": "message", "ts": "1800000000.000100", "user": "UMIRA", "text": "psst"}]}})");
+    const ConvRef d = e.conv("D1");
+    // The next sweep (10 min: 6 s here) brings it.
+    REQUIRE(pumpUntil(
+        [&] { return e.store.findMessage(d, model::parseTs("1800000000.000100")) != nullptr; }, 9000
+    ));
+    fakeslack::pumpFor(200);
+    CHECK(Log().count("rtm.connect") == rtm);
+    CHECK(e.be->hasRealtimePush());
 }
 
 TEST("slack read: a channel read elsewhere loses its badge with the next client.counts") {

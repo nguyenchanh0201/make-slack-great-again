@@ -1175,12 +1175,15 @@ TEST("live rtm: a missed message re-establishes the link, throttled") {
         "has_more": false}})");
     REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.000900")); }));
     REQUIRE(pumpUntil([&] { return count("rtm.connect") == connects + 1 && rtm->connected(); }));
-    // A second miss inside kReestablishGapMs: no second reconnect.
+    // A second miss inside kReestablishGapMs (the live safety poll is that
+    // slow: showing the window again polls at once): no second reconnect.
     set(R"({"conversations.history": {"ok": true, "messages": [
         {"type": "message", "user": "UMIRA", "text": "again", "ts": "1800000000.001000"},
         {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
         {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
         "has_more": false}})");
+    e.be->setWindowVisible(false);
+    e.be->setWindowVisible(true);
     REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.001000")); }));
     pumpFor(100);
     CHECK(count("rtm.connect") == connects + 1);

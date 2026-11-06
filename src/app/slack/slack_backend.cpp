@@ -45,28 +45,32 @@ namespace {
 // the roster lacks (a new DM or channel) or drops a member one (left or
 // closed elsewhere), at most every kRosterSoonestGapMs, and otherwise every
 // kRosterFallbackGapMs for renames and topics.
-constexpr int64_t     kRosterReloadGapMs      = 60'000;
-constexpr int64_t     kRosterSoonestGapMs     = 10'000;
-constexpr int64_t     kRosterFallbackGapMs    = 15 * 60'000;
-constexpr int64_t     kDirectoryGapMs         = 10 * 60'000; // the channel browser's list
-constexpr int64_t     kCountsPollGapMs        = 10'000;
-constexpr int64_t     kThreadsPollGapMs       = 20'000;
-constexpr int64_t     kBackgroundPollGapMs    = 2 * 60'000;
-constexpr int64_t     kPresencePollGapMs      = 60'000;
-constexpr int64_t     kAwayProbeGapMs         = 5 * 60'000; // a posting "away" author, per user
+constexpr int64_t     kRosterReloadGapMs       = 60'000;
+constexpr int64_t     kRosterSoonestGapMs      = 10'000;
+constexpr int64_t     kRosterFallbackGapMs     = 15 * 60'000;
+constexpr int64_t     kDirectoryGapMs          = 10 * 60'000; // the channel browser's list
+constexpr int64_t     kCountsPollGapMs         = 10'000;
+constexpr int64_t     kThreadsPollGapMs        = 20'000;
+constexpr int64_t     kBackgroundPollGapMs     = 2 * 60'000;
+constexpr int64_t     kPresencePollGapMs       = 60'000;
+constexpr int64_t     kAwayProbeGapMs          = 5 * 60'000; // a posting "away" author, per user
 // The open chat of a session workspace while the window is hidden: client.counts
 // still brings it forward the moment it moves (applyActivity).
-constexpr int64_t     kHiddenOpenPollGapMs    = 60'000;
-constexpr int64_t     kSelfPresenceGapMs      = 60'000; // _selfPresenceTimer
-constexpr int64_t     kStarredGapMs           = 5 * 60'000;
-constexpr int64_t     kSavedGapMs             = 5 * 60'000; // kRemindersRefreshGapMs
-constexpr int64_t     kScheduledGapMs         = 5 * 60'000; // ones scheduled elsewhere
-constexpr int64_t     kScheduledSentSlackMs   = 15'000;     // re-list this long after one is due
-constexpr int64_t     kUsersRefreshGapMs      = 24 * 60 * 60'000;
-constexpr int64_t     kLookupRetryTransientMs = 10 * 60'000; // a failed users.info after a 5xx
-constexpr int64_t     kDmSweepGapSecs         = 12 * 3600;   // across restarts, via the cache
-constexpr int         kOffRosterProbeMs       = 90'000;
-constexpr int         kPacedMs                = 1200; // the _infoApi background lane
+constexpr int64_t     kHiddenOpenPollGapMs     = 60'000;
+constexpr int64_t     kSelfPresenceGapMs       = 60'000; // _selfPresenceTimer
+// A session workspace while its RTM link is up: events deliver, polls are a
+// safety net (the open chat's misses re-establish the socket).
+constexpr int64_t     kLiveOpenPollGapMs       = 60'000;
+constexpr int64_t     kLiveBackgroundPollGapMs = 10 * 60'000;
+constexpr int64_t     kStarredGapMs            = 5 * 60'000;
+constexpr int64_t     kSavedGapMs              = 5 * 60'000; // kRemindersRefreshGapMs
+constexpr int64_t     kScheduledGapMs          = 5 * 60'000; // ones scheduled elsewhere
+constexpr int64_t     kScheduledSentSlackMs    = 15'000;     // re-list this long after one is due
+constexpr int64_t     kUsersRefreshGapMs       = 24 * 60 * 60'000;
+constexpr int64_t     kLookupRetryTransientMs  = 10 * 60'000; // a failed users.info after a 5xx
+constexpr int64_t     kDmSweepGapSecs          = 12 * 3600;   // across restarts, via the cache
+constexpr int         kOffRosterProbeMs        = 90'000;
+constexpr int         kPacedMs                 = 1200; // the _infoApi background lane
 constexpr int         kPresenceHot = 8, kPresenceRotate = 4;
 constexpr int         kMaxDiffPolls = 8, kCountsFailureLimit = 3;
 constexpr int         kMaxThreadInjects = 12, kMaxThreadBacklog = 3;
@@ -2492,8 +2496,12 @@ void SlackBackend::Read::tick() {
     if (!watches.empty())
         pollWatches();
     // (2) The open chat; hidden, client.counts brings it forward when it
-    // moves (applyActivity).
-    const int64_t fgGap = !session ? 60'000 : visible ? 5'000 : kHiddenOpenPollGapMs;
+    // moves (applyActivity). Live, events bring it.
+    const bool    live  = push && session;
+    const int64_t fgGap = !session  ? 60'000
+                          : live    ? kLiveOpenPollGapMs
+                          : visible ? 5'000
+                                    : kHiddenOpenPollGapMs;
     if (openConv != kNoConv && t - lastFg >= fgGap) {
         lastFg = t;
         pollConversation(openConv, true);
@@ -2529,7 +2537,7 @@ void SlackBackend::Read::tick() {
         refreshSelfPresence();
     }
     // Background rotation over the other member conversations.
-    if (t - lastBg >= kBackgroundPollGapMs) {
+    if (t - lastBg >= (live ? kLiveBackgroundPollGapMs : kBackgroundPollGapMs)) {
         lastBg = t;
         if (const ConvRef bg = nextBackgroundTarget(); bg != kNoConv)
             pollConversation(bg, false);
@@ -2746,8 +2754,9 @@ void SlackBackend::Read::pollConversation(ConvRef c, bool foreground, Ts hint) {
                         missed = inject(c, m.clone(), false) || missed;
             // The socket should have pushed that: it is compromised and
             // re-established (throttled). On a poll-only workspace
-            // this poll IS the delivery, not a miss.
-            if (missed && b.hasRealtimePush())
+            // this poll IS the delivery, not a miss. A session workspace's
+            // background sweep never reconnects (an rtm.connect storm).
+            if (missed && b.hasRealtimePush() && (foreground || !session))
                 b.realtimeMissed();
             if (!foreground || page.empty())
                 return;
