@@ -3086,19 +3086,30 @@ void Shell::openSettingsAt(uint8_t page) {
         if (r->backend->capabilities().sidebarTheme &&
             (themeKey.empty() || (r->store == &_ctx.store() && _signedIn)))
             themeKey = r->key;
-    if (!themeKey.empty() || (_running.empty() && _ctx.backend.capabilities().sidebarTheme))
-        hooks.fetchSlackTheme = [this,
-                                 themeKey](settings::SettingsDialog::Hooks::SlackThemeDone done) {
+    if (!themeKey.empty() || (_running.empty() && _ctx.backend.capabilities().sidebarTheme)) {
+        using Prefs = std::function<void(model::Backend::SidebarTheme, std::string)>;
+        // The theme and the emoji habits both come from that workspace's prefs.
+        auto prefs  = [this, themeKey](Prefs got) {
             const Running  *r = themeKey.empty() ? nullptr : findRunning(themeKey);
             model::Backend *b = r ? r->backend : themeKey.empty() ? &_ctx.backend : nullptr;
             if (!b) {
-                done({}, {}, "no_workspace");
+                got({}, "no_workspace");
                 return;
             }
-            b->loadSidebarTheme([done](model::Backend::SidebarTheme t, std::string err) {
+            b->loadSidebarTheme(std::move(got));
+        };
+        hooks.fetchSlackTheme = [prefs](settings::SettingsDialog::Hooks::SlackThemeDone done) {
+            prefs([done](model::Backend::SidebarTheme t, std::string err) {
                 done(std::move(t.iaTheme), std::move(t.legacyValues), std::move(err));
             });
         };
+        hooks.fetchSlackReactions =
+            [prefs](settings::SettingsDialog::Hooks::SlackReactionsDone done) {
+                prefs([done](model::Backend::SidebarTheme t, std::string err) {
+                    done(std::move(t.emojiUse), t.skinTone, std::move(err));
+                });
+            };
+    }
     auto *dlg = new settings::SettingsDialog(
         _ctx, _settings, std::move(hooks), settings::SettingsDialog::Page(page)
     );

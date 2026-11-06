@@ -2349,6 +2349,38 @@ void SlackBackend::loadSidebarTheme(std::function<void(SidebarTheme, std::string
                 );
             if (complete)
                 t.legacyValues = std::move(values);
+            // emoji_use: {"name": count, …} (often sent as a string). A
+            // toned use counts for its base emoji: the tone is the account's.
+            json::Document use;
+            json::Value    counts = p["emoji_use"];
+            if (counts.isString() && use.parse(std::string(counts.str()), nullptr))
+                counts = use.root();
+            std::vector<std::pair<int64_t, std::string>> byUse;
+            for (const json::Value e : counts) {
+                std::string_view name = e.key();
+                if (const size_t at = name.find("::skin-tone-"); at != std::string_view::npos)
+                    name = name.substr(0, at);
+                if (name.empty() || e.integer() <= 0)
+                    continue;
+                auto it = std::find_if(byUse.begin(), byUse.end(), [&](const auto &u) {
+                    return u.second == name;
+                });
+                if (it == byUse.end())
+                    byUse.emplace_back(e.integer(), std::string(name));
+                else
+                    it->first += e.integer();
+            }
+            std::stable_sort(byUse.begin(), byUse.end(), [](const auto &a, const auto &b) {
+                return a.first > b.first;
+            });
+            for (auto &u : byUse)
+                t.emojiUse.push_back(std::move(u.second));
+            // preferred_skin_tone: "" for none, else "2"…"6" (or a number).
+            const json::Value tone = p["preferred_skin_tone"];
+            const int64_t     n    = tone.isString() && tone.str().size() == 1
+                                         ? int64_t(tone.str()[0] - '0')
+                                         : tone.integer();
+            t.skinTone             = n >= 2 && n <= 6 ? int(n) : 0;
             if (done)
                 done(std::move(t), {});
         });

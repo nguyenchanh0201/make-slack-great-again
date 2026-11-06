@@ -777,9 +777,13 @@ public:
 
     // The account's own theme in the service (Capabilities::sidebarTheme):
     // Slack's redesign theme JSON and/or the
-    // legacy comma-separated sidebar colours ("" each when absent).
+    // legacy comma-separated sidebar colours ("" each when absent). The same
+    // prefs carry the account's emoji habits: its emoji, most used first
+    // (tone suffixes dropped), and its skin tone (2-6, 0 for none).
     struct SidebarTheme {
-        std::string iaTheme, legacyValues;
+        std::string              iaTheme, legacyValues;
+        std::vector<std::string> emojiUse;
+        int                      skinTone = 0;
     };
     virtual void loadSidebarTheme(std::function<void(SidebarTheme, std::string error)> done) {
         if (done)

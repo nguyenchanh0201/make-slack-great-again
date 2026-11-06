@@ -67,6 +67,12 @@ public:
         using SlackThemeDone =
             std::function<void(std::string iaTheme, std::string legacy, std::string error)>;
         std::function<void(SlackThemeDone)> fetchSlackTheme;
+        // Appearance → One-click reactions → "Use my Slack reactions" (shown
+        // when fetchSlackTheme is, the same prefs): done(emoji most used
+        // first, skin tone 2-6 or 0, error).
+        using SlackReactionsDone =
+            std::function<void(std::vector<std::string> emoji, int tone, std::string error)>;
+        std::function<void(SlackReactionsDone)> fetchSlackReactions;
     };
 
     SettingsDialog(

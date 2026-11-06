@@ -364,7 +364,9 @@ TEST("slack features: the account's Slack theme from users.prefs.get") {
     Env e(
         R"({"users.prefs.get": {"ok": true, "prefs": {
         "ia_theme": "{\"primary\":{\"palette\":\"aubergine\"}}",
-        "sidebar_theme_custom_values": "{\"column_bg\":\"#111111\",\"menu_bg\":\"#222222\",\"active_item\":\"#333333\",\"active_item_text\":\"#444444\",\"hover_item\":\"#555555\",\"text_color\":\"#666666\",\"active_presence\":\"#777777\",\"badge\":\"#888888\"}"}}})"
+        "sidebar_theme_custom_values": "{\"column_bg\":\"#111111\",\"menu_bg\":\"#222222\",\"active_item\":\"#333333\",\"active_item_text\":\"#444444\",\"hover_item\":\"#555555\",\"text_color\":\"#666666\",\"active_presence\":\"#777777\",\"badge\":\"#888888\"}",
+        "emoji_use": "{\"+1\":5,\"eyes\":7,\"+1::skin-tone-3\":4,\"tada\":2,\"meh\":0}",
+        "preferred_skin_tone": "3"}}})"
     );
     REQUIRE(e.connect());
     CHECK(e.be->capabilities().sidebarTheme);
@@ -380,6 +382,9 @@ TEST("slack features: the account's Slack theme from users.prefs.get") {
     CHECK(err.empty());
     CHECK_STR(t.iaTheme, "{\"primary\":{\"palette\":\"aubergine\"}}");
     CHECK_STR(t.legacyValues, "#111111,#222222,#333333,#444444,#555555,#666666,#777777,#888888");
+    // The emoji habits ride along: a toned use counts for its base emoji.
+    CHECK((t.emojiUse == std::vector<std::string>{"+1", "eyes", "tada"}));
+    CHECK(t.skinTone == 3);
     // OAuth tokens can't read it.
     Env o({}, false);
     CHECK(!o.be->capabilities().sidebarTheme);

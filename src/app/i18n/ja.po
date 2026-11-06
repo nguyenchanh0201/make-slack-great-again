@@ -1576,6 +1576,26 @@ msgid "Shown on a message's toolbar: a click adds the reaction, another takes it
 msgstr "メッセージのツールバーに表示されます。クリックでリアクションを追加し、もう一度クリックで取り消します。"
 
 #: src/app/screens/settings/settings_dialog.cpp
+msgid "Use my Slack reactions"
+msgstr "Slack のリアクションを使う"
+
+#: src/app/screens/settings/settings_dialog.cpp
+msgid "Reading your Slack reactions…"
+msgstr "Slack のリアクションを読み込んでいます…"
+
+#: src/app/screens/settings/settings_dialog.cpp
+msgid "Your Slack account has no emoji history"
+msgstr "Slack アカウントに絵文字の使用履歴がありません"
+
+#: src/app/screens/settings/settings_dialog.cpp
+msgid "Could not read your Slack reactions (%1)"
+msgstr "Slack のリアクションを読み取れませんでした（%1）"
+
+#: src/app/screens/settings/settings_dialog.cpp
+msgid "Imported %1 emoji from Slack"
+msgstr "Slack から絵文字を %1 件インポートしました"
+
+#: src/app/screens/settings/settings_dialog.cpp
 msgid "Names"
 msgstr "名前の表示"
 
