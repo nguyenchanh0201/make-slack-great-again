@@ -3693,6 +3693,24 @@ TEST("search bar: shows the workspace name") {
     h.sh->setSignedIn(true);
 }
 
+TEST("search bar: a page row opens in its own workspace") {
+    TwoWorkspaces w;
+    w.sh->openUnifiedSearch();
+    pump();
+    shell::UnifiedSearch *us = w.sh->unifiedSearch();
+    REQUIRE(us);
+    us->setTab(1);
+    REQUIRE(!us->rows().empty());
+    REQUIRE(us->rows()[0].kind == shell::UnifiedSearch::RowKind::Recent);
+    REQUIRE(us->rows()[0].text == "Threads");
+    us->choose(0);
+    pump();
+    REQUIRE(w.switched.size() == 1);
+    CHECK_STR(w.switched[0], kKeyB);
+    CHECK(&w.ctx.store() == &w.b);
+    CHECK(w.sh->pageOpen(shell::Shell::Page::Threads));
+}
+
 TEST("search bar: a person row opens a DM in the right workspace") {
     TwoWorkspaces w;
     User          z;

@@ -536,9 +536,9 @@ void UnifiedSearch::choose(int index) {
                     f(key, c);
             };
         else
-            act = [f = onOpenPage, n = p.page] {
+            act = [f = onOpenPage, key, n = p.page] {
                 if (f)
-                    f(n);
+                    f(key, n);
             };
         break;
     }

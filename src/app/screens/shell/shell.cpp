@@ -3611,7 +3611,10 @@ void Shell::openUnifiedSearch() {
         if (reach(key))
             open(conv);
     };
-    raw->onOpenPage    = [this](Page page) { showPage(page); };
+    raw->onOpenPage = [this, reach](const std::string &key, Page page) {
+        if (reach(key))
+            showPage(page);
+    };
     raw->onMessageUser = [this, reach](const std::string &key, model::UserRef u) {
         if (reach(key) && _ctx.messageUser)
             _ctx.messageUser(u);

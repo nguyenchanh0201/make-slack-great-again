@@ -63,7 +63,7 @@ public:
 
     // Outlets (`key`: the selected tab's workspace).
     std::function<void(const std::string &key, model::ConvRef)>            onOpenConv;
-    std::function<void(Sidebar::Nav)>                                      onOpenPage;
+    std::function<void(const std::string &key, Sidebar::Nav)>              onOpenPage;
     std::function<void(const std::string &key, model::UserRef)>            onMessageUser;
     std::function<void(const std::string &key, model::ConvRef, model::Ts)> onOpenMessage;
 
