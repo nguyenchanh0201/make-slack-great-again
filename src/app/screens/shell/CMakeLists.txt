@@ -25,6 +25,7 @@ add_library(msga_screens_shell STATIC
     signin_dialogs.cpp
     message_search.cpp
     quick_switcher.cpp
+    unified_search.cpp
     unified_search_model.cpp
     shortcuts.cpp
     shell.cpp
