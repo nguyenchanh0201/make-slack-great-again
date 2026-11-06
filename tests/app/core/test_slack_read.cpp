@@ -1002,6 +1002,66 @@ TEST("slack read: a cooldown releases queued reads one at a time") {
     CHECK(answered[2].second - answered[1].second >= 70);
 }
 
+TEST("slack read: a user's read goes out first after a throttled retry") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10");
+    const ConvRef c5 = e.addChannel("C5");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    int  answered = 0;
+    auto poll     = [&](const char *id) { // a poll's read: Normal lane, not urgent
+        e.be->readCallForTest(
+            "conversations.history",
+            std::string("channel=") + id,
+            [&](const json::Document &, const std::string &) { ++answered; },
+            false
+        );
+    };
+    poll("C1");
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // C1's 429 lands: the method cools down
+    poll("C2");
+    poll("C3");
+    poll("C4");
+    e.be->loadHistory(c5, 0, [&](bool, const std::string &) { ++answered; });
+    REQUIRE(pumpUntil([&] { return answered == 5; }));
+    Log log;
+    REQUIRE(log.count("conversations.history") == 6);
+    // The 429, then: the throttled retry, the user's load, the polls in turn.
+    const char *order[] = {"C1", "C1", "C5", "C2", "C3", "C4"};
+    for (int i = 0; i < 6; ++i)
+        CHECK_STR(log.get("conversations.history", i)["form"]["channel"].str(), order[i]);
+}
+
+TEST("slack read: identical writes riding the read path are never merged") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10");
+    const ConvRef c  = e.addChannel("C1");
+    const Ts      ts = model::parseTs("1700000100.000000");
+    script("chat.delete", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    // chat.delete rides the read path (retried like a read); two more of
+    // the same delete during its cooldown are two more requests, not one.
+    int  answered = 0;
+    auto del      = [&] {
+        e.be->deleteAgentReply(c, ts, [&](bool, const std::string &) { ++answered; });
+    };
+    del();
+    REQUIRE(pumpUntil([&] { return Log().count("chat.delete") == 1; }));
+    fakeslack::pumpFor(20);
+    del();
+    del();
+    REQUIRE(pumpUntil([&] { return answered == 3; }));
+    fakeslack::pumpFor(300);
+    CHECK(Log().count("chat.delete") == 4);
+}
+
 TEST("slack read: writes are never merged") {
     if (!haveServer())
         return;

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <list>
 #include <memory>
 #include <tuple>
 #include <unordered_set>
@@ -141,7 +142,10 @@ struct SlackBackend::Read {
     int64_t       speed = 1; // MSGA_SLACK_TEST_SPEEDUP: tests compress every delay
 
     // ── Plumbing ────────────────────────────────────────────────────────────
-    enum class Lane : uint8_t { Normal, Background };
+    // Urgent: a Normal read the user waits on, first out of a throttled
+    // method's queue. Write: a Normal-lane write safe to repeat (readCall's
+    // writes), never merged with another call.
+    enum class Lane : uint8_t { Normal, Background, Urgent, Write };
     struct Call {
         std::string method, form;
         ApiDone     done;
@@ -150,24 +154,25 @@ struct SlackBackend::Read {
         bool        quiet   = false; // a 429 waits without the banner
         int         normals = 0;     // Normal-lane callers this call answers
     };
-    model::OneShotTimers                              timers{b._app}; // pending one-shots
-    plat::TimerId                                     tickTimer = 0;
-    std::deque<Call>                                  paced;
+    model::OneShotTimers                                       timers{b._app}; // pending one-shots
+    plat::TimerId                                              tickTimer = 0;
+    std::deque<Call>                                           paced;
     // The queued (not yet issued) paced calls by method + form: a repeat
     // joins the queued one instead of costing another request. Deque
     // references survive push_back/pop_front of other elements.
-    std::unordered_map<std::string, Call *>           pacedByKey;
-    bool                                              pacedBusy     = false;
+    std::unordered_map<std::string, Call *>                    pacedByKey;
+    bool                                                       pacedBusy     = false;
     // Normal-lane calls not yet answered (in flight, backing off or waiting
     // out a 429): the paced lane holds while any is.
-    int                                               normalPending = 0;
-    std::unordered_map<std::string, int64_t>          readyAt; // per-method 429 cooldown
+    int                                                        normalPending = 0;
+    std::unordered_map<std::string, int64_t>                   readyAt; // per-method 429 cooldown
     // Calls of a throttled method waiting out its cooldown, released one per
     // kReleaseMs so they don't trip the limit again together. A repeat of a
-    // held call (method + form) joins it, like pacedByKey. A method is here
-    // exactly while its release timer is pending.
-    std::unordered_map<std::string, std::deque<Call>> held;      // by method
-    std::unordered_map<std::string, Call *>           heldByKey; // method + form
+    // held read (method + form) joins it, like pacedByKey. A method is here
+    // exactly while its release timer is pending. A list: urgent calls are
+    // inserted mid-queue and heldByKey's iterators must survive that.
+    std::unordered_map<std::string, std::list<Call>>           held;      // by method
+    std::unordered_map<std::string, std::list<Call>::iterator> heldByKey; // method + form
 
     int64_t now() const { return base::monotonicMs() * speed; }
     void    later(int64_t ms, std::function<void()> fn);
@@ -459,8 +464,8 @@ void SlackBackend::Read::call(
     std::string method, std::string form, ApiDone done, Lane lane, bool quiet
 ) {
     Call c{std::move(method), std::move(form), std::move(done), 0, lane, quiet};
-    c.normals = lane == Lane::Normal;
-    if (lane == Lane::Normal) {
+    c.normals = lane != Lane::Background;
+    if (lane != Lane::Background) {
         ++normalPending;
         issue(std::move(c));
         return;
@@ -508,28 +513,40 @@ void SlackBackend::Read::issue(Call c) {
 }
 
 void SlackBackend::Read::hold(Call c, bool front) {
-    std::string key = str::concat({c.method, "\n", c.form});
-    if (const auto it = heldByKey.find(key); it != heldByKey.end()) {
-        join(*it->second, std::move(c));
-        return;
-    }
-    const bool fresh = !held.contains(c.method);
+    std::string key   = str::concat({c.method, "\n", c.form});
+    const auto  dup   = c.lane == Lane::Write ? heldByKey.end() : heldByKey.find(key);
+    const bool  fresh = !held.contains(c.method);
     if (fresh)
         later(std::max<int64_t>(readyAt[c.method] - now(), 0), [this, m = c.method] {
             release(m);
         });
-    std::deque<Call> &q = held[c.method];
-    if (front)
-        q.push_front(std::move(c));
-    else
-        q.push_back(std::move(c));
-    heldByKey.emplace(std::move(key), front ? &q.front() : &q.back());
+    std::list<Call> &q    = held[c.method];
+    // Urgent: after the throttled retry (first) and the urgent calls before it.
+    auto             spot = [&q] {
+        auto at = q.empty() ? q.end() : std::next(q.begin());
+        while (at != q.end() && at->lane == Lane::Urgent)
+            ++at;
+        return at;
+    };
+    if (dup != heldByKey.end()) {
+        const bool promote = c.lane == Lane::Urgent && dup->second->lane != Lane::Urgent;
+        join(*dup->second, std::move(c));
+        if (promote && dup->second != q.begin())
+            q.splice(spot(), q, dup->second);
+        return;
+    }
+    const bool urgent = c.lane == Lane::Urgent;
+    const auto at     = q.insert(front ? q.begin() : urgent ? spot() : q.end(), std::move(c));
+    if (at->lane != Lane::Write)
+        heldByKey.emplace(std::move(key), at);
 }
 
 void SlackBackend::Read::join(Call &queued, Call c) {
     // One request answers both callers.
     queued.normals += c.normals;
     queued.quiet = queued.quiet && c.quiet;
+    if (c.lane == Lane::Urgent)
+        queued.lane = Lane::Urgent;
     if (!c.done)
         return;
     if (!queued.done) {
@@ -544,7 +561,7 @@ void SlackBackend::Read::join(Call &queued, Call c) {
 }
 
 void SlackBackend::Read::release(const std::string &method) {
-    std::deque<Call> &q = held[method];
+    std::list<Call> &q = held[method];
     // A second 429 meanwhile pushed the cooldown out: wait that out first.
     if (const int64_t wait = readyAt[method] - now(); wait > 0) {
         later(wait, [this, method] { release(method); });
@@ -552,7 +569,8 @@ void SlackBackend::Read::release(const std::string &method) {
     }
     Call c = std::move(q.front());
     q.pop_front();
-    heldByKey.erase(str::concat({c.method, "\n", c.form}));
+    if (c.lane != Lane::Write)
+        heldByKey.erase(str::concat({c.method, "\n", c.form}));
     if (q.empty())
         held.erase(method);
     else
@@ -659,7 +677,7 @@ void SlackBackend::Read::pageFrom(std::shared_ptr<Pager> p, std::string cursor) 
             const std::string_view next = root["response_metadata"]["next_cursor"].str();
             if (next.empty())
                 p->onDone({});
-            else if (p->lane == Lane::Normal && !paced.empty())
+            else if (p->lane != Lane::Background && !paced.empty())
                 // A long listing lets the paced lane in between its pages
                 // (it only moves while no Normal call is outstanding).
                 later(0, [this, p, next = std::string(next)] { pageFrom(p, next); });
@@ -2218,7 +2236,8 @@ void SlackBackend::loadHistory(ConvRef conv, Ts before, Done done) {
                 });
             if (done)
                 done(true, {});
-        }
+        },
+        Read::Lane::Urgent
     );
 }
 
@@ -2312,7 +2331,8 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
             if (done)
                 done(true, {});
         },
-        kMaxThreadPages
+        kMaxThreadPages,
+        live ? Lane::Normal : Lane::Urgent // !live: the user opened it
     );
 }
 
@@ -3740,6 +3760,10 @@ void SlackBackend::readPages(
     _read->paginate(
         std::move(method), std::move(form), std::move(key), std::move(onPage), std::move(onDone)
     );
+}
+
+void SlackBackend::writeCall(std::string method, std::string form, ApiDone done) {
+    _read->call(std::move(method), std::move(form), std::move(done), Read::Lane::Write);
 }
 
 void SlackBackend::readCall(std::string method, std::string form, ApiDone done, bool background) {
