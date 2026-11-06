@@ -71,6 +71,7 @@ constexpr int64_t     kLookupRetryTransientMs  = 10 * 60'000; // a failed users.
 constexpr int64_t     kDmSweepGapSecs          = 12 * 3600;   // across restarts, via the cache
 constexpr int         kOffRosterProbeMs        = 90'000;
 constexpr int         kPacedMs                 = 1200; // the _infoApi background lane
+constexpr int         kReleaseMs   = 1000; // a throttled method's queue, after its cooldown
 constexpr int         kPresenceHot = 8, kPresenceRotate = 4;
 constexpr int         kMaxDiffPolls = 8, kCountsFailureLimit = 3;
 constexpr int         kMaxThreadInjects = 12, kMaxThreadBacklog = 3;
@@ -147,19 +148,26 @@ struct SlackBackend::Read {
         int         attempt = 0;
         Lane        lane    = Lane::Normal;
         bool        quiet   = false; // a 429 waits without the banner
+        int         normals = 0;     // Normal-lane callers this call answers
     };
-    model::OneShotTimers                     timers{b._app}; // pending one-shots
-    plat::TimerId                            tickTimer = 0;
-    std::deque<Call>                         paced;
+    model::OneShotTimers                              timers{b._app}; // pending one-shots
+    plat::TimerId                                     tickTimer = 0;
+    std::deque<Call>                                  paced;
     // The queued (not yet issued) paced calls by method + form: a repeat
     // joins the queued one instead of costing another request. Deque
     // references survive push_back/pop_front of other elements.
-    std::unordered_map<std::string, Call *>  pacedByKey;
-    bool                                     pacedBusy     = false;
+    std::unordered_map<std::string, Call *>           pacedByKey;
+    bool                                              pacedBusy     = false;
     // Normal-lane calls not yet answered (in flight, backing off or waiting
     // out a 429): the paced lane holds while any is.
-    int                                      normalPending = 0;
-    std::unordered_map<std::string, int64_t> readyAt; // per-method 429 cooldown
+    int                                               normalPending = 0;
+    std::unordered_map<std::string, int64_t>          readyAt; // per-method 429 cooldown
+    // Calls of a throttled method waiting out its cooldown, released one per
+    // kReleaseMs so they don't trip the limit again together. A repeat of a
+    // held call (method + form) joins it, like pacedByKey. A method is here
+    // exactly while its release timer is pending.
+    std::unordered_map<std::string, std::deque<Call>> held;      // by method
+    std::unordered_map<std::string, Call *>           heldByKey; // method + form
 
     int64_t now() const { return base::monotonicMs() * speed; }
     void    later(int64_t ms, std::function<void()> fn);
@@ -170,8 +178,12 @@ struct SlackBackend::Read {
         Lane        lane  = Lane::Normal,
         bool        quiet = false
     );
-    void issue(Call c);
-    void pumpPaced();
+    void        issue(Call c);
+    void        send(Call c);
+    static void join(Call &queued, Call c);
+    void        hold(Call c, bool front);
+    void        release(const std::string &method);
+    void        pumpPaced();
     struct Pager {
         std::string                              method, form, key;
         std::function<void(const json::Value &)> onPage;
@@ -447,6 +459,7 @@ void SlackBackend::Read::call(
     std::string method, std::string form, ApiDone done, Lane lane, bool quiet
 ) {
     Call c{std::move(method), std::move(form), std::move(done), 0, lane, quiet};
+    c.normals = lane == Lane::Normal;
     if (lane == Lane::Normal) {
         ++normalPending;
         issue(std::move(c));
@@ -459,19 +472,7 @@ void SlackBackend::Read::call(
     if (const auto it = pacedByKey.find(key); it != pacedByKey.end()) {
         // The same call is already waiting (a presence round while the lane
         // is held): one request answers both callers.
-        Call &queued = *it->second;
-        if (c.done) {
-            if (!queued.done) {
-                queued.done = std::move(c.done);
-            } else {
-                queued.done = [a = std::move(queued.done), b = std::move(c.done)](
-                                  const json::Document &doc, const std::string &err
-                              ) {
-                    a(doc, err);
-                    b(doc, err);
-                };
-            }
-        }
+        join(*it->second, std::move(c));
         return;
     }
     paced.push_back(std::move(c));
@@ -496,12 +497,70 @@ void SlackBackend::Read::pumpPaced() {
 }
 
 void SlackBackend::Read::issue(Call c) {
-    // Slack throttles per method: only this method waits out Retry-After.
-    if (const auto it = readyAt.find(c.method); it != readyAt.end() && it->second > now()) {
-        const int64_t wait = it->second - now();
-        later(wait, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
+    // Slack throttles per method: only this method waits out Retry-After,
+    // and it stays queued behind the method's held calls until they're out.
+    const auto it = readyAt.find(c.method);
+    if ((it != readyAt.end() && it->second > now()) || held.contains(c.method)) {
+        hold(std::move(c), false);
         return;
     }
+    send(std::move(c));
+}
+
+void SlackBackend::Read::hold(Call c, bool front) {
+    std::string key = str::concat({c.method, "\n", c.form});
+    if (const auto it = heldByKey.find(key); it != heldByKey.end()) {
+        join(*it->second, std::move(c));
+        return;
+    }
+    const bool fresh = !held.contains(c.method);
+    if (fresh)
+        later(std::max<int64_t>(readyAt[c.method] - now(), 0), [this, m = c.method] {
+            release(m);
+        });
+    std::deque<Call> &q = held[c.method];
+    if (front)
+        q.push_front(std::move(c));
+    else
+        q.push_back(std::move(c));
+    heldByKey.emplace(std::move(key), front ? &q.front() : &q.back());
+}
+
+void SlackBackend::Read::join(Call &queued, Call c) {
+    // One request answers both callers.
+    queued.normals += c.normals;
+    queued.quiet = queued.quiet && c.quiet;
+    if (!c.done)
+        return;
+    if (!queued.done) {
+        queued.done = std::move(c.done);
+        return;
+    }
+    queued.done = [a = std::move(queued.done),
+                   b = std::move(c.done)](const json::Document &doc, const std::string &err) {
+        a(doc, err);
+        b(doc, err);
+    };
+}
+
+void SlackBackend::Read::release(const std::string &method) {
+    std::deque<Call> &q = held[method];
+    // A second 429 meanwhile pushed the cooldown out: wait that out first.
+    if (const int64_t wait = readyAt[method] - now(); wait > 0) {
+        later(wait, [this, method] { release(method); });
+        return;
+    }
+    Call c = std::move(q.front());
+    q.pop_front();
+    heldByKey.erase(str::concat({c.method, "\n", c.form}));
+    if (q.empty())
+        held.erase(method);
+    else
+        later(kReleaseMs, [this, method] { release(method); });
+    send(std::move(c));
+}
+
+void SlackBackend::Read::send(Call c) {
     const std::string method = c.method, form = c.form;
     const bool        quiet = c.quiet;
     b.issueApi(
@@ -514,7 +573,7 @@ void SlackBackend::Read::issue(Call c) {
                     "slack", "%s rate-limited, retrying in %llds", c.method.c_str(), (long long)secs
                 );
                 readyAt[c.method] = now() + secs * 1000;
-                later(secs * 1000, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
+                hold(std::move(c), true); // first out once the cooldown ends
                 return;
             }
             // Transient Slack errors and lost connections: a bounded backoff
@@ -528,11 +587,11 @@ void SlackBackend::Read::issue(Call c) {
                 later(delay, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
                 return;
             }
-            const bool held  = c.lane == Lane::Normal && --normalPending == 0;
+            const bool holds = c.normals > 0 && (normalPending -= c.normals) == 0;
             const auto alive = b._alive; // `done` may end the backend
             if (c.done)
                 c.done(doc, err);
-            if (held && *alive)
+            if (holds && *alive)
                 pumpPaced();
         },
         false,

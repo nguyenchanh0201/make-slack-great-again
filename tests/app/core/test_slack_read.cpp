@@ -9,11 +9,13 @@
 #include "app/slack/slack_json.h"
 #include "support/fake_slack_server.h"
 #include "base/json.h"
+#include "base/time.h"
 #include "support/test.h"
 
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 #ifndef _WIN32
 
@@ -151,6 +153,17 @@ struct Env {
             ok     = o;
         });
         return pumpUntil([&] { return called; }) && ok;
+    }
+    // A slower clock (MSGA_SLACK_TEST_SPEEDUP=x): for tests timing the gap
+    // between requests, which 100x would squeeze under the scheduler's jitter.
+    void respeed(const char *x) {
+        be.reset();
+        base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", x);
+        slack::Credentials cr;
+        cr.token  = "xoxc-test";
+        cr.cookie = "xoxd-test";
+        cr.teamId = "T1";
+        be        = std::make_unique<slack::SlackBackend>(store, app(), client, cr);
     }
     ConvRef            conv(const char *id) const { return store.findConversation(id); }
     const model::User &user(const char *id) const { return store.user(store.findUser(id)); }
@@ -924,6 +937,88 @@ TEST("slack read: a rate-limited call waits out Retry-After and retries") {
     REQUIRE(e.history(c, 0));
     CHECK(e.store.conversation(c).messages.size() == 1);
     CHECK(Log().count("conversations.history") == 2);
+}
+
+TEST("slack read: identical throttled reads merge") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10"); // the 1 s cooldown is 100 ms: room to ask again inside it
+    const ConvRef c = e.addChannel("C1");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"},
+      {"ok": true, "has_more": false, "messages": [
+        {"type": "message", "ts": "1700000100.000000", "user": "UME", "text": "made it"}]}
+    ])");
+    int  calls = 0, oks = 0;
+    auto done = [&](bool ok, const std::string &) {
+        ++calls;
+        oks += ok;
+    };
+    e.be->loadHistory(c, 0, done);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // the 429 lands: C1's history cools down
+    for (int i = 0; i < 3; ++i)
+        e.be->loadHistory(c, 0, done);
+    REQUIRE(pumpUntil([&] { return calls == 4; }));
+    fakeslack::pumpFor(300);
+    CHECK(calls == 4); // each caller heard once
+    CHECK(oks == 4);   // the one answer
+    CHECK(Log().count("conversations.history", "channel", "C1") == 2);
+    CHECK(e.store.conversation(c).messages.size() == 1);
+}
+
+TEST("slack read: a cooldown releases queued reads one at a time") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10"); // 1 s apart is 100 ms here
+    const ConvRef c1 = e.addChannel("C1");
+    const ConvRef c2 = e.addChannel("C2");
+    const ConvRef c3 = e.addChannel("C3");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    std::vector<std::pair<ConvRef, int64_t>> answered; // conv, when its answer came
+    auto                                     load = [&](ConvRef c) {
+        e.be->loadHistory(c, 0, [&, c](bool, const std::string &) {
+            answered.emplace_back(c, base::monotonicMs());
+        });
+    };
+    load(c1);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20);
+    load(c2);
+    load(c3);
+    REQUIRE(pumpUntil([&] { return answered.size() == 3; }));
+    Log log;
+    REQUIRE(log.count("conversations.history") == 4);
+    CHECK_STR(log.get("conversations.history", 1)["form"]["channel"].str(), "C1");
+    CHECK_STR(log.get("conversations.history", 2)["form"]["channel"].str(), "C2");
+    CHECK_STR(log.get("conversations.history", 3)["form"]["channel"].str(), "C3");
+    CHECK(answered[0].first == c1 && answered[1].first == c2 && answered[2].first == c3);
+    // Not a burst: ~100 ms between them (some slack for the answers' own latency).
+    CHECK(answered[1].second - answered[0].second >= 70);
+    CHECK(answered[2].second - answered[1].second >= 70);
+}
+
+TEST("slack read: writes are never merged") {
+    if (!haveServer())
+        return;
+    Env           e(nullptr);
+    const ConvRef c = e.addChannel("C1");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "30"}, "ok": false, "error": "ratelimited"}
+    ])");
+    e.be->loadHistory(c, 0, nullptr);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // history cools down for 300 ms
+    int sent = 0;
+    for (int i = 0; i < 2; ++i)
+        e.be->send(c, "same words", 0, [&](bool ok, const std::string &) { sent += ok; });
+    REQUIRE(pumpUntil([&] { return sent == 2; }, 250)); // inside the cooldown
+    CHECK(Log().count("chat.postMessage") == 2);
+    CHECK(Log().count("conversations.history") == 1);
 }
 
 TEST("slack read: a gateway page or a lost connection is retried, not the end") {
