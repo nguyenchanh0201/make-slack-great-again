@@ -154,7 +154,7 @@ public:
         _bar        = add<ui::View>();
         _bar->style()
             .row()
-            .padding(24, 0, 24 - 8, 0)
+            .padding(kBarLeft, 0, 24 - 8, 0)
             .spacing(ui::metric(ui::M::SpaceXS))
             .items(ui::Align::Center);
         auto *name = ui::styledLabel(
@@ -231,6 +231,13 @@ public:
 
 private:
     static constexpr float kBarH = 56, kMargin = 24;
+#ifdef __APPLE__
+    // The viewer fills the window, title bar band included: start the name
+    // clear of the traffic lights AppKit draws over the bar's left end.
+    static constexpr float kBarLeft = 88;
+#else
+    static constexpr float kBarLeft = 24;
+#endif
     // A round button on the dark bar: 20-px onDark icon, a white wash on hover.
     class ViewerButton final : public IconButton {
     public:
