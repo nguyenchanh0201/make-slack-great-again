@@ -1395,15 +1395,15 @@ class SearchBar final : public Clickable {
 public:
     explicit SearchBar(float h) {
         style().row().flex(1).height(h).padding(10, 0).spacing(6).items(Align::Center);
-        add<IconView>(Icon::Search, 14, C::TitleBarControl)->setHitTransparent(true);
-        _text = add<Label>("", Font::Control, C::TitleBarControl);
+        add<IconView>(Icon::Search, 14, C::AccentText)->setHitTransparent(true);
+        _text = add<Label>("", Font::Control, C::AccentText);
         _text->setMaxLines(1);
         _text->setHitTransparent(true);
         _text->style().flex(1);
     }
     void setText(std::string t) { _text->setText(std::move(t)); }
-    void paint(gfx::Painter &p) override {
-        p.fillRoundRect(bounds(), 6, gfx::withAlpha(0xffffffff, hovered() ? 0.7f : 0.55f));
+    void paint(gfx::Painter &p) override { // a light veil over the title bar, white text on it
+        p.fillRoundRect(bounds(), 6, gfx::withAlpha(0xffffffff, hovered() ? 0.3f : 0.22f));
     }
 
 private:
@@ -1423,9 +1423,18 @@ void Shell::buildTitleBar(View *parent) {
 #else
     _titleBarH = kTitleBarH; // the window controls follow the bar
 #endif
-    _titleBar->style().row().height(_titleBarH).noShrink().items(Align::Center);
+    // The bar centred, at most 640 wide, between spacers: the strip on
+    // either side stays free to drag the window by.
+    _titleBar->style()
+        .row()
+        .height(_titleBarH)
+        .noShrink()
+        .items(Align::Center)
+        .justifyContent(Justify::Center);
+    _titleBar->add<View>()->style().flex(1);
     auto *bar = _titleBar->add<SearchBar>(std::max(_titleBarH - 12, 18.f));
-    bar->style().margins(8, 0, 8, 0);
+    bar->style().flex(8).margins(8, 0, 8, 0).maxW = 640;
+    _titleBar->add<View>()->style().flex(1);
     bar->onClick          = [this] { openUnifiedSearch(); };
     _searchBar            = bar;
     strip->onStyleChanged = [this] { syncChrome(); };
@@ -3545,7 +3554,8 @@ void Shell::openUnifiedSearch() {
         backends = {&_ctx.backend};
         openTab  = 0;
     }
-    auto p = std::make_unique<UnifiedSearch>(
+    tabs[size_t(openTab)].open = _current; // not a place to go back to
+    auto p                     = std::make_unique<UnifiedSearch>(
         _ctx, _avatars, std::move(tabs), openTab, [backends](int tab) {
             return backends[size_t(tab)];
         }
@@ -3578,13 +3588,14 @@ void Shell::openUnifiedSearch() {
         if (reach(key))
             jumpToMessage(conv, ts, 0);
     };
-    // Under the bar; centred near the top while the title bar is hidden
-    // (clear of the edge, where full screen's menu bar slides in).
+    // Centred under the bar; centred near the top while the title bar is
+    // hidden (clear of the edge, where full screen's menu bar slides in).
+    const float w = p->style().w;
     if (_searchBar && titleBarHeight() > 0) {
-        p->setAnchor(_searchBar->windowRect(), Popup::Place::Below);
+        const RectF b = _searchBar->windowRect();
+        p->setAnchor({b.x + (b.w - w) / 2, b.y, w, b.h}, Popup::Place::Below);
     } else {
-        const SizeF ws = _win.size();
-        p->setAnchor({(ws.w - 600) / 2, 90, 600, 0}, Popup::Place::Below);
+        p->setAnchor({(_win.size().w - w) / 2, 90, w, 0}, Popup::Place::Below);
     }
     p->onClosed = [this, raw] {
         if (_unified == raw)
@@ -3601,8 +3612,8 @@ plat::HitArea Shell::hitTest(plat::Point p) const {
     const SizeF   sz  = _win.size();
 #ifdef __APPLE__
     // AppKit resizes from its own edge zone (on and just outside the frame);
-    // ours would only leave a dead band along the unified header's edges,
-    // where the whole title bar drags.
+    // ours would only leave a dead band along the title strip's edges,
+    // where the whole strip drags.
     const bool resizable = p.y >= titleBarHeight();
 #else
     const bool resizable = true;
@@ -3631,8 +3642,8 @@ plat::HitArea Shell::hitTest(plat::Point p) const {
         return H::Client;
     const PointF pt{float(p.x), float(p.y)};
 #ifdef __APPLE__
-    // The unified header: its controls (and whatever a popup puts over it)
-    // take their presses; the title, the empty space and a dialog's backdrop
+    // The title strip: the search bar (and whatever a popup puts over it)
+    // takes its presses; the empty space beside it and a dialog's backdrop
     // drag the window. The traffic lights never get
     // here: AppKit keeps their presses (PlatNSWindow).
     View *v = _win.viewAt(pt);

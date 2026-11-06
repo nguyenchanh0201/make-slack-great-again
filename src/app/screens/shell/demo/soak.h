@@ -1,9 +1,8 @@
 // The leak soak (`msga --demo demo --soak N`, run by scripts/soak.sh): the
 // same round of navigation N times over the demo workspace — every
 // conversation (and a thread in each that has one), the Threads, Saved and
-// Scheduled pages, the search overlay, the quick switcher, Settings, a
-// profile card, a theme switch and back — printing the memory numbers after
-// each round:
+// Scheduled pages, the unified search, Settings, a profile card, a theme
+// switch and back — printing the memory numbers after each round:
 //
 //   msga soak: round 3/20: heap 41234 KB, rss 98765 KB, fds 37, threads 14; images …
 //

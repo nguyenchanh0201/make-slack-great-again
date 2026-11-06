@@ -258,7 +258,6 @@ constexpr FontRole kFonts[] = {
     {13.2f, text::Weight::Regular, false},  // YouLabel
     {10.1f, text::Weight::Bold, false},     // TileBold
     {18, text::Weight::Semibold, false},    // HeaderTitle
-    {16, text::Weight::Semibold, false},    // UnifiedTitle
     {13, text::Weight::Bold, false},        // TabBold
     {10, text::Weight::Regular, false},     // Tiny
     {11, text::Weight::Semibold, false},    // PlateName

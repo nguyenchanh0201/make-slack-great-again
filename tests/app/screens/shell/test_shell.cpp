@@ -3679,6 +3679,29 @@ TEST("workspaces: the search panel has a tab per workspace; ←/→ and typing m
     CHECK(w.sh->current() == w.b.findConversation("C0DESIGN"));
 }
 
+TEST("search bar: the first Recent place is the conversation before this one") {
+    Harness       h;
+    const ConvRef design = h.conv("C0DESIGN"), random = h.conv("C0RANDOM");
+    h.sh->open(design);
+    pump();
+    h.sh->open(random);
+    pump();
+    const auto order = shell::quickSwitchOrder(h.store, h.sh->sidebar().visited());
+    REQUIRE(order.size() >= 2);
+    const ConvRef before = order[0] == random ? order[1] : order[0];
+    h.sh->openUnifiedSearch();
+    pump();
+    shell::UnifiedSearch *us = h.sh->unifiedSearch();
+    REQUIRE(us);
+    for (const auto &r : us->rows())
+        CHECK(r.text != h.store.displayName(random)); // the open one is left out
+    REQUIRE(us->rows()[0].kind == shell::UnifiedSearch::RowKind::Recent);
+    CHECK_STR(us->rows()[0].text, h.store.displayName(before));
+    CHECK(us->selected() == 0);
+    press(*h.win, plat::Key::Enter);
+    CHECK(h.sh->current() == before);
+}
+
 TEST("search bar: shows the workspace name") {
     Harness h;
     h.store.workspaceName = "CODE LEAP";
@@ -3700,15 +3723,31 @@ TEST("search bar: a page row opens in its own workspace") {
     shell::UnifiedSearch *us = w.sh->unifiedSearch();
     REQUIRE(us);
     us->setTab(1);
-    REQUIRE(!us->rows().empty());
-    REQUIRE(us->rows()[0].kind == shell::UnifiedSearch::RowKind::Recent);
-    REQUIRE(us->rows()[0].text == "Threads");
-    us->choose(0);
+    const auto &rows    = us->rows();
+    const auto  threads = std::find_if(rows.begin(), rows.end(), [](const auto &r) {
+        return r.kind == shell::UnifiedSearch::RowKind::Recent && r.text == "Threads";
+    });
+    REQUIRE(threads != rows.end());
+    us->choose(int(threads - rows.begin()));
     pump();
     REQUIRE(w.switched.size() == 1);
     CHECK_STR(w.switched[0], kKeyB);
     CHECK(&w.ctx.store() == &w.b);
     CHECK(w.sh->pageOpen(shell::Shell::Page::Threads));
+}
+
+TEST("search bar: detaching a workspace closes the panel open on its tab") {
+    TwoWorkspaces w;
+    w.sh->openUnifiedSearch();
+    pump();
+    shell::UnifiedSearch *us = w.sh->unifiedSearch();
+    REQUIRE(us);
+    us->setTab(1);
+    us->field().insertText("second");
+    w.sh->detachWorkspace(kKeyB);
+    pump();
+    CHECK(w.sh->unifiedSearch() == nullptr);
+    pump();
 }
 
 TEST("search bar: a person row opens a DM in the right workspace") {
@@ -4175,9 +4214,11 @@ TEST("title bar: controls take their presses, empty space drags the window") {
     const ui::RectF bar = h.sh->searchBar()->windowRect();
     CHECK(search.y > bar.y + bar.h);
     CHECK(at(search) == H::Client);
-    CHECK(at(centre(hd.title())) == H::Client);        // the row is client area
-    CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar
-    CHECK(at({40, 20}) == H::Caption);                 // empty space by the traffic lights
+    CHECK(at(centre(hd.title())) == H::Client);          // the row is client area
+    CHECK(at(centre(h.sh->searchBar())) == H::Client);   // the search bar
+    CHECK(at({40, 20}) == H::Caption);                   // empty space by the traffic lights
+    CHECK(at({h.win->size().w - 40, 20}) == H::Caption); // and right of the bar
+    CHECK(bar.w <= 640);
     CHECK(at({600, 2}) == H::Caption); // its edges too: AppKit resizes from its own zone
     CHECK(at({2, 20}) == H::Caption);
     CHECK(at({2, 300}) == H::ResizeLeft);

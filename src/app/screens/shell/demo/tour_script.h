@@ -24,7 +24,7 @@ struct TourStep {
         React,        // arg = message text fragment, arg2 = emoji name
         Search,       // arg = query — open search, type it, run it
         CloseSearch,  //
-        QuickSwitch,  // arg = text typed into the quick switcher, then Enter
+        QuickSwitch,  // arg = text typed into the unified search, then Enter
         Theme,        // arg = light | dark
         Settings,     // list = pages to walk, ms = per page
         MessageMenu,  // arg = message text fragment — its hover toolbar's "…"

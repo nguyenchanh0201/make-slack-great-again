@@ -102,7 +102,7 @@ public:
     // it runs, open or in the background. Its new messages notify (the title
     // says which workspace when it isn't the open one), its unread state
     // shows on its rail tile and counts toward the tray and launcher badge,
-    // and the quick switcher, the forward dialog and the workspace menu
+    // and the unified search, the forward dialog and the workspace menu
     // reach it. With none attached (the demo, tests) the open Store counts
     // alone.
     void attachWorkspace(const std::string &key, model::Store &store, model::Backend &backend);

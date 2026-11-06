@@ -22,6 +22,7 @@
 #endif
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 
@@ -272,7 +273,9 @@ TEST("header row: full screen keeps the header and ⌘F opens search") {
     shell::UnifiedSearch *us = h.sh->unifiedSearch();
     REQUIRE(us != nullptr);
 #ifdef __APPLE__
-    CHECK(us->windowRect().y >= 90); // clear of the top edge, the strip hidden
+    const ui::RectF pr = us->windowRect();
+    CHECK(pr.y >= 90); // clear of the top edge, the strip hidden
+    CHECK(std::fabs(pr.x + pr.w / 2 - h.win->size().w / 2) <= 1); // centred
 #endif
     us->close();
     pump();
@@ -301,6 +304,9 @@ TEST("search bar: a click, ⌘F and ⌘K open the same panel") {
         REQUIRE(us != nullptr);
         CHECK(h.win->topPopup() == us);
         CHECK(us->field().focused());
+        const ui::RectF pr = us->windowRect(); // centred under the bar
+        CHECK(std::fabs(pr.x + pr.w / 2 - (r.x + r.w / 2)) <= 1);
+        CHECK(pr.y >= r.y + r.h);
         h.chord(kCtrl, K::F); // a second ⌘F keeps the one panel
         CHECK(h.sh->unifiedSearch() == us);
         CHECK(h.win->topPopup() == us);

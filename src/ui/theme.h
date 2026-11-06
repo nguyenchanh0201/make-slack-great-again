@@ -130,7 +130,7 @@ enum class C : uint8_t {
     MenuDanger,
     MenuHover,
     MenuSeparator,
-    DividerSubtle, // divider.subtle: the rule under macOS's unified header
+    DividerSubtle, // divider.subtle: a faint rule (the palette's; unused for now)
     Count
 };
 
@@ -174,7 +174,6 @@ enum class Font : uint8_t {
     YouLabel,
     TileBold,      // the group-DM tile's count (0.38 of its 20 px)
     HeaderTitle,   // the conversation header's name (fonts.xxl, 600)
-    UnifiedTitle,  // …and the macOS unified header's, the workspace's there (fonts.xl, 600)
     TabBold,       // the active Messages / canvas tab (fonts.md, bold)
     Tiny,          // fonts.xs: "Also send to channel"
     PlateName,     // fonts.sm semibold: attachment chip names
