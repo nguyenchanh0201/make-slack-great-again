@@ -1868,6 +1868,10 @@ void Shell::showSampleNotification(
     _sampleResult = std::move(result);
     notificationImage({workspaceIconPath()}, [this, n = std::move(n)](plat::Image img) mutable {
         n.image = std::move(img);
+#ifdef __APPLE__
+        n.silent = !_settings.notifySound;
+        n.soundName = sounds::notificationSound(_settings.soundId);
+#endif
         sampleNotificationReady(n);
     });
 }
@@ -2925,9 +2929,9 @@ void Shell::updateAttention() {
         }
     }
     unread = unread || n > 0;
-    if (n != _lastBadge)
-        _ctx.app.platform().setBadgeCount(n);
     const int tray = n > 0 ? 2 : unread ? 1 : 0;
+    if (n != _lastBadge || tray != _lastTray)
+        _ctx.app.platform().setBadgeCount(n, unread);
     if (n != _lastBadge || tray != _lastTray)
         refreshTrayIcon(n, unread);
     _lastBadge = n;

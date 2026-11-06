@@ -32,11 +32,12 @@ std::vector<Entry> bundled();
 // thread, never inside this call.
 void systemSounds(plat::App &app, std::function<void(std::vector<Entry>)> done);
 
-// plat::Notification::silent for every notification the app shows, per OS:
-// on macOS the notification never carries a sound (the app plays its own
-// chime; one attached would double it); on Linux and Windows it goes out with
-// no sound hint at all, so the notification daemon / the toast plays whatever
-// the OS plays by default, besides the app's own chime.
+// Native macOS notification resource name; no playback or filesystem access.
+// Unknown/empty ids use the bundled chime; system ids retain their native name.
+std::string notificationSound(const std::string &id);
+
+// Legacy callers' default. macOS delivery sets silent from the sound setting
+// and attaches notificationSound(); previews still use play().
 #ifdef __APPLE__
 inline constexpr bool kSilentNotifications = true;
 #else

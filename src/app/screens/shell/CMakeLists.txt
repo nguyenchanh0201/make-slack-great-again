@@ -162,6 +162,11 @@ if(APPLE)
                         --output-partial-info-plist "${CMAKE_BINARY_DIR}/actool_partial.plist")
         endif()
     endif()
+    # CMake tracks the resource input, including local sound changes, before signing.
+    configure_file("${MSGA_NOTIFY_SOUND_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/msga-notify.wav" COPYONLY)
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/msga-notify.wav"
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(msga PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/msga-notify.wav")
     add_custom_command(TARGET msga POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${MSGA_INFO_PLIST}" "$<TARGET_BUNDLE_CONTENT_DIR:msga>/Info.plist"

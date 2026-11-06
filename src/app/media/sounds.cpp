@@ -45,6 +45,12 @@ std::string bundledPath(const std::string &dir) {
 
 } // namespace
 
+std::string notificationSound(const std::string &id) {
+    if (str::startsWith(id, kSystem) && id.size() > kSystem.size())
+        return id.substr(kSystem.size());
+    return "msga-notify.wav";
+}
+
 std::vector<Entry> bundled() {
     return {{kDefaultId, tr("msga chime")}};
 }

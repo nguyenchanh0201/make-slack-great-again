@@ -54,6 +54,24 @@ if(TARGET msga_app_llm)
         FAKE_LLM_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/support/fake_llm.py")
 endif()
 
+if(APPLE)
+    enable_language(OBJCXX)
+    add_executable(cocoa_notification_sound_tests plat/test_cocoa_notification_sound.mm)
+    set_target_properties(cocoa_notification_sound_tests PROPERTIES OBJCXX_STANDARD 20)
+    target_compile_options(cocoa_notification_sound_tests PRIVATE -fobjc-arc -UNDEBUG)
+    target_include_directories(cocoa_notification_sound_tests PRIVATE
+        "${MSGA_ROOT}/src/plat/src" "${MSGA_ROOT}/src/plat/include" "${MSGA_ROOT}/src/prim/include")
+    target_link_libraries(cocoa_notification_sound_tests PRIVATE
+        "-framework AppKit" "-framework UserNotifications"
+        "-framework UniformTypeIdentifiers" "-framework ImageIO")
+    # The private resolver is included directly; unused CocoaApp entry points
+    # need no app runtime. Only the resolver runs, with explicit temporary paths.
+    target_link_options(cocoa_notification_sound_tests PRIVATE
+        -Wl,-dead_strip -Wl,-undefined,dynamic_lookup)
+    add_test(NAME cocoa_notification_sound_tests COMMAND cocoa_notification_sound_tests)
+    set_tests_properties(cocoa_notification_sound_tests PROPERTIES LABELS core)
+endif()
+
 # ── Suites, bottom-up ───────────────────────────────────────────────────────
 foreach(dir base net gfx text ui app)
     if(TARGET msga_${dir} OR (dir STREQUAL "app" AND TARGET msga_app_core))
