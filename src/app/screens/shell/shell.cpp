@@ -3107,6 +3107,7 @@ void Shell::openSettingsAt(uint8_t page) {
             _settingsDlg = nullptr;
 #ifdef __APPLE__
         _header->setEnabled(true);
+        _titleLabel->setVisible(true);
 #endif
     };
     _settingsDlg = dlg;
@@ -3114,6 +3115,9 @@ void Shell::openSettingsAt(uint8_t page) {
     // Settings covers the body, but the unified header is in the title bar:
     // its actions are blocked while Settings is open.
     _header->setEnabled(false);
+    // A disabled header paints at reduced opacity, its background included:
+    // the workspace name under it would show through the conversation's.
+    _titleLabel->setVisible(!_header->visible());
 #endif
     _win.showPopup(std::unique_ptr<Popup>(dlg));
     dlg->sections().focus();
