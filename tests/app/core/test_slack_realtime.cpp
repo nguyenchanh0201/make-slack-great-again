@@ -694,17 +694,17 @@ TEST("slack realtime: a missed message re-establishes the socket") {
     e.be->setActiveConversation(e.conv("C1"), 0);
     // The open chat's poll finds what the socket never pushed.
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     REQUIRE(pumpUntil(
-        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1800000000.000800")); }, 5000
+        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1700000600.000800")); }, 5000
     ));
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     REQUIRE(pumpUntil(
-        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1800000000.000900")); }, 5000
+        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1700000600.000900")); }, 5000
     ));
     REQUIRE(pumpUntil([&] { return count("apps.connections.open") == 2; }));
     REQUIRE(pumpUntil([&] { return e.socket->connected() && e.socket->socketsForTest() == 1; }));
@@ -1163,30 +1163,124 @@ TEST("live rtm: a missed message re-establishes the link, throttled") {
     const ConvRef c = e.conv("C1");
     // Opened with it already there: loaded, not missed.
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     e.be->setActiveConversation(c, 0);
-    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.000800")); }));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.000800")); }));
     const int connects = count("rtm.connect");
     // The open chat's poll finds what the socket never pushed: re-established.
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
-    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.000900")); }));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.000900")); }));
     REQUIRE(pumpUntil([&] { return count("rtm.connect") == connects + 1 && rtm->connected(); }));
     // A second miss inside kReestablishGapMs (the live safety poll is that
     // slow: showing the window again polls at once): no second reconnect.
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "again", "ts": "1800000000.001000"},
-        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "again", "ts": "1700000600.001000"},
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     e.be->setWindowVisible(false);
     e.be->setWindowVisible(true);
-    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.001000")); }));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.001000")); }));
     pumpFor(100);
     CHECK(count("rtm.connect") == connects + 1);
+}
+
+// A message `ago` seconds old, as a history answer (newest first) over "first".
+static std::string historyWith(int64_t ago) {
+    return str::concat(
+        {R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "late", "ts": ")",
+         str::number(base::nowSecs() - ago),
+         R"(.000100"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+        "has_more": false}})"}
+    );
+}
+
+TEST("live rtm: a poll that beats its event is no miss; an old find is") {
+    if (!haveServer())
+        return;
+    for (const int64_t ago : {0, 30}) {
+        Env                        e(true, false);
+        slack::RtmPresence::Timing t;
+        t.reconnectMinMs = 20;
+        e.be->presenceLinkForTest()->setTimingForTest(t);
+        REQUIRE(e.connect());
+        REQUIRE(rtmLive(e));
+        const ConvRef c = e.conv("C1");
+        set(R"({"conversations.history": {"ok": true, "messages": [
+            {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+            "has_more": false}})");
+        e.be->setActiveConversation(c, 0);
+        REQUIRE(pumpUntil([&] {
+            return e.store.findMessage(c, model::parseTs("1700000600.000800"));
+        }));
+        const int connects = count("rtm.connect");
+        // The poll's answer lands before the RTM frame (ts = now), or brings
+        // one 30 s old the socket never pushed.
+        set(historyWith(ago));
+        const size_t held = e.store.conversation(c).messages.size();
+        e.be->setWindowVisible(false);
+        e.be->setWindowVisible(true); // polls at once
+        REQUIRE(pumpUntil([&] { return e.store.conversation(c).messages.size() > held; }));
+        pumpFor(200);
+        CHECK(count("rtm.connect") == connects + (ago ? 1 : 0));
+    }
+}
+
+TEST("live rtm: a link dropping after each hello backs off and backfills once per 30 s") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    // 10x, not 100x: 30 s is 3 s, well past the reconnects below however
+    // the scheduler stalls.
+    e.be.reset();
+    base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", "10");
+    slack::Credentials cr;
+    cr.token  = "xoxc-test";
+    cr.cookie = "xoxd-test";
+    cr.teamId = "T1";
+    e.be      = std::make_unique<slack::SlackBackend>(e.store, app(), e.client, cr);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.reconnectMinMs = 40;
+    t.reconnectMaxMs = 1'000;
+    rtm->setTimingForTest(t);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    // Hidden: the open chat polls once a minute (6 s here), so its history
+    // calls below are the backfills alone.
+    e.be->setWindowVisible(false);
+    const ConvRef c = e.conv("C1");
+    e.be->setActiveConversation(c, 0);
+    pumpFor(100);
+    const auto history = [] {
+        int       n = 0;
+        const Log log;
+        for (json::Value r : log.doc.root())
+            n += r["method"].str() == "conversations.history" && r["form"]["channel"].str() == "C1";
+        return n;
+    };
+    const int            h0 = history();
+    // Three drops right after hello: back 40, 80, 160 ms later (not 40 each),
+    // all inside 30 s (3 s here) of the first backfill.
+    std::vector<int64_t> gaps;
+    for (int i = 0; i < 3; ++i) {
+        const int     opens = count("ws-open");
+        const int64_t at    = base::monotonicMs();
+        ctl("POST", "/_ctl/ws/close", "{\"conn\":\"" + rtmConn() + "\",\"code\":1001}");
+        REQUIRE(
+            pumpUntil([&] { return count("ws-open") > opens && e.be->hasRealtimePush(); }, 3000)
+        );
+        gaps.push_back(base::monotonicMs() - at);
+    }
+    CHECK(gaps[2] >= 140);
+    pumpFor(50);
+    CHECK(history() - h0 == 1);
 }
 
 TEST("slack realtime: a huddle_thread starts a live huddle, its edit ends it") {

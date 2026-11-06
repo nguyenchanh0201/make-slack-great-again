@@ -39,6 +39,7 @@ constexpr int64_t kUnreadResyncGapMs     = 2 * 60'000;
 constexpr int64_t kUnreadFullResyncGapMs = 10 * 60'000;
 constexpr size_t  kUnreadResyncTop       = 24;
 constexpr int64_t kReestablishGapMs      = 60'000;
+constexpr int64_t kBackfillGapMs         = 30'000; // a flapping link's open-chat backfills
 constexpr int64_t kContentionNoticeGap   = 5 * 60'000;
 constexpr int     kRefreshCheckMs        = 60'000;
 constexpr int64_t kRefreshAheadSecs      = 3600;
@@ -80,6 +81,7 @@ struct SlackBackend::Live {
     std::shared_ptr<SocketMode> socket;
     uint32_t                    sink       = 0;
     int64_t                     lastReload = -1, lastResync = -1, lastReestablish = -1;
+    int64_t                     lastBackfill   = -1;
     int64_t                     lastFullResync = -1;
     int64_t                     lastContention = -1;
     plat::TimerId               groupsTimer    = 0;
@@ -152,8 +154,10 @@ SlackBackend::Live::Live(SlackBackend &b) : b(b), s(b.store()) {
                 this->b.refreshSelfPresence(nullptr);
             });
         };
-        // The workspace's own socket: every event is ours. A frame without a
-        // type (a reply ack: {"ok":true,"reply_to":…}) is no event.
+        // The workspace's own socket: every event is ours (ours = true).
+        // Unverified: Enterprise Grid / Slack Connect frames about another
+        // workspace's conversations. A frame without a type (a reply ack:
+        // {"ok":true,"reply_to":…}) is no event.
         rtm->onEvent = [this](const json::Value &ev) {
             if (!this->b._authLost && !ev["type"].str().empty())
                 apply(ev, true);
@@ -202,8 +206,9 @@ void SlackBackend::setRealtime(std::shared_ptr<SocketMode> socket) {
 }
 
 bool SlackBackend::hasRealtimePush() const {
-    // The RTM link only while up: refused or reconnecting, polling stands in.
-    return _live->socket != nullptr || (_live->rtm && _live->rtm->connected());
+    // The RTM link only once it said hello: refused, reconnecting or not yet
+    // greeted, polling stands in.
+    return _live->socket != nullptr || (_live->rtm && _live->rtm->live());
 }
 
 void SlackBackend::Live::attach(std::shared_ptr<SocketMode> sock) {
@@ -234,7 +239,7 @@ void SlackBackend::realtimeMissed() {
     Live      &l   = *_live;
     // Throttled: a persistently sick socket would otherwise reconnect on
     // every poll, each one a conversations.list reload (the 429 storm).
-    const bool rtm = l.rtm && l.rtm->connected();
+    const bool rtm = l.rtm && l.rtm->live();
     if ((!l.socket && !rtm) || !l.due(l.lastReestablish, kReestablishGapMs))
         return;
     LOG_WARN(
@@ -569,7 +574,8 @@ void SlackBackend::Live::onReconnected() {
     // can't (it reports no unread counts).
     if (due(lastReload, kReconnectReloadGapMs))
         b.reloadConversations();
-    b.backfillOpen();
+    if (due(lastBackfill, kBackfillGapMs))
+        b.backfillOpen();
     resyncUnreads();
 }
 

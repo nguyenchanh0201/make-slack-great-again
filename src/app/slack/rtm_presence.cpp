@@ -95,7 +95,7 @@ void RtmPresence::refreshState() {
         _mode == Mode::Native ? Link::Off
         : _unavailable        ? Link::Unavailable
         : _idle               ? Link::Idle
-        : _up && connected()  ? Link::Active
+        : live()              ? Link::Active
                               : Link::Connecting
     );
     // WhileRunning tickles on a clock; a link turning active is active at
@@ -180,6 +180,7 @@ void RtmPresence::connectWs(const std::string &url) {
 
 void RtmPresence::teardown() {
     ++_generation;
+    resetBackoffIfStable();
     _connecting     = false;
     _up             = false;
     _connectedSince = 0;
@@ -188,6 +189,13 @@ void RtmPresence::teardown() {
     stopTimer(_pingTimer);
     stopTimer(_tickleTimer);
     retireSocket(_app, _ws); // not inside its own callback
+}
+
+void RtmPresence::resetBackoffIfStable() {
+    // Only a durable connection resets the backoff (rtm.connect is Tier 1): a
+    // link dropping right after each hello keeps backing off.
+    if (_connectedSince && base::monotonicMs() - _connectedSince >= _t.stableMs)
+        _reconnectMs = _t.reconnectMinMs;
 }
 
 void RtmPresence::scheduleReconnect() {
@@ -224,9 +232,7 @@ void RtmPresence::onClosed(int code, const std::string &reason) {
     _up         = false;
     stopTimer(_pingTimer);
     retireSocket(_app, _ws);
-    // Only a durable connection resets the backoff (rtm.connect is Tier 1).
-    if (_connectedSince && now - _connectedSince >= _t.stableMs)
-        _reconnectMs = _t.reconnectMinMs;
+    resetBackoffIfStable();
     _connectedSince = 0;
     _awaitingPongs  = 0;
     refreshState();
@@ -245,7 +251,6 @@ void RtmPresence::onText(const std::string &text) {
         return;
     const std::string_view type = doc.root()["type"].str();
     if (type == "hello") {
-        _reconnectMs   = _t.reconnectMinMs;
         _up            = true;
         const bool gap = _hadHello;
         _hadHello      = true;

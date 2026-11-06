@@ -75,6 +75,8 @@ public:
     };
     void setTimingForTest(const Timing &t) { _t = t; }
     bool connected() const;
+    // Connected and said hello: events are flowing.
+    bool live() const { return _up && connected(); }
 
 private:
     // Whether the socket should be up: started, or a holding mode not idled
@@ -86,6 +88,7 @@ private:
     void connectWs(const std::string &url);
     void teardown(); // the socket, the handshake, the link timers; state untouched
     void scheduleReconnect();
+    void resetBackoffIfStable(); // the socket stayed up Timing::stableMs
     void onOpen();
     void onClosed(int code, const std::string &reason);
     void onText(const std::string &text);

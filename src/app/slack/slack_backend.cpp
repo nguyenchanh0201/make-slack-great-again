@@ -60,9 +60,11 @@ constexpr int64_t     kAwayProbeGapMs          = 5 * 60'000; // a posting "away"
 constexpr int64_t     kHiddenOpenPollGapMs     = 60'000;
 constexpr int64_t     kSelfPresenceGapMs       = 60'000; // _selfPresenceTimer
 // A session workspace while its RTM link is up: events deliver, polls are a
-// safety net (the open chat's misses re-establish the socket).
+// safety net (the open chat's misses re-establish the socket). Equal to
+// kReestablishGapMs (slack_realtime.cpp): live misses re-establish at most once a minute.
 constexpr int64_t     kLiveOpenPollGapMs       = 60'000;
 constexpr int64_t     kLiveBackgroundPollGapMs = 10 * 60'000;
+constexpr int64_t     kMissGraceUs             = 10'000'000; // a poll racing the event
 constexpr int64_t     kStarredGapMs            = 5 * 60'000;
 constexpr int64_t     kSavedGapMs              = 5 * 60'000; // kRemindersRefreshGapMs
 constexpr int64_t     kScheduledGapMs          = 5 * 60'000; // ones scheduled elsewhere
@@ -153,7 +155,10 @@ struct SlackBackend::Read {
         Lane        lane    = Lane::Normal;
         bool        quiet   = false; // a 429 waits without the banner
         int         normals = 0;     // Normal-lane callers this call answers
+        uint64_t    seq     = 0;     // call order: 429 retries keep it
+        bool        retry   = false; // held after its own 429 (heads the queue)
     };
+    uint64_t                                                   nextSeq = 0;
     model::OneShotTimers                                       timers{b._app}; // pending one-shots
     plat::TimerId                                              tickTimer = 0;
     std::deque<Call>                                           paced;
@@ -465,6 +470,7 @@ void SlackBackend::Read::call(
 ) {
     Call c{std::move(method), std::move(form), std::move(done), 0, lane, quiet};
     c.normals = lane != Lane::Background;
+    c.seq     = ++nextSeq;
     if (lane != Lane::Background) {
         ++normalPending;
         issue(std::move(c));
@@ -521,12 +527,18 @@ void SlackBackend::Read::hold(Call c, bool front) {
             release(m);
         });
     std::list<Call> &q    = held[c.method];
-    // Urgent: after the throttled retry (first) and the urgent calls before it.
+    // Urgent: after the head (a throttled retry), the other retries and the
+    // urgent calls before it.
     auto             spot = [&q] {
         auto at = q.empty() ? q.end() : std::next(q.begin());
-        while (at != q.end() && at->lane == Lane::Urgent)
+        while (at != q.end() && (at->retry || at->lane == Lane::Urgent))
             ++at;
         return at;
+    };
+    // A 429 retry: back in call order among the queued (two in flight
+    // together come back in the order they were made, whatever their answers').
+    auto inOrder = [&q](uint64_t seq) {
+        return std::find_if(q.begin(), q.end(), [seq](const Call &x) { return x.seq > seq; });
     };
     if (dup != heldByKey.end()) {
         const bool promote = c.lane == Lane::Urgent && dup->second->lane != Lane::Urgent;
@@ -536,7 +548,8 @@ void SlackBackend::Read::hold(Call c, bool front) {
         return;
     }
     const bool urgent = c.lane == Lane::Urgent;
-    const auto at     = q.insert(front ? q.begin() : urgent ? spot() : q.end(), std::move(c));
+    c.retry           = front;
+    const auto at     = q.insert(front ? inOrder(c.seq) : urgent ? spot() : q.end(), std::move(c));
     if (at->lane != Lane::Write)
         heldByKey.emplace(std::move(key), at);
 }
@@ -2561,13 +2574,18 @@ void SlackBackend::Read::tick() {
         loadConversations([](const std::string &) {});
     }
     pruneThreadState();
-    // (0b) One request reports every conversation's activity.
-    if (!push && !countsDisabled && t - lastCounts >= kCountsPollGapMs) {
+    // A session workspace's RTM link up: events deliver, polls are a safety net.
+    const bool live = push && session;
+    // (0b) One request reports every conversation's activity. Live, still
+    // (slowly): the Activity badge and Threads lean on it. Not app keys'.
+    if ((!push || live) && !countsDisabled &&
+        t - lastCounts >= (live ? kLiveOpenPollGapMs : kCountsPollGapMs)) {
         lastCounts = t;
         pollUnreadCounts();
     }
     // (0c) Thread replies move no channel's `latest`: only the feed sees them.
-    if (!push && session && !threadsUnavailable && t - lastThreads >= kThreadsPollGapMs) {
+    if (session && !threadsUnavailable &&
+        t - lastThreads >= (live ? kLiveOpenPollGapMs : kThreadsPollGapMs)) {
         lastThreads = t;
         pollThreadReplies();
     }
@@ -2576,7 +2594,6 @@ void SlackBackend::Read::tick() {
         pollWatches();
     // (2) The open chat; hidden, client.counts brings it forward when it
     // moves (applyActivity). Live, events bring it.
-    const bool    live  = push && session;
     const int64_t fgGap = !session  ? 60'000
                           : live    ? kLiveOpenPollGapMs
                           : visible ? 5'000
@@ -2826,11 +2843,14 @@ void SlackBackend::Read::pollConversation(ConvRef c, bool foreground, Ts hint) {
             if (priming && !foreground)
                 return;
             resolveAuthors(page);
-            bool missed = false;
+            // A message under kMissGraceUs old may simply have beaten its
+            // event here: delivered, not missed.
+            const Ts recent = base::nowMicros() - kMissGraceUs;
+            bool     missed = false;
             if (!priming)
                 for (const model::Message &m : page)
                     if (m.ts > lastKnown)
-                        missed = inject(c, m.clone(), false) || missed;
+                        missed = (inject(c, m.clone(), false) && m.ts < recent) || missed;
             // The socket should have pushed that: it is compromised and
             // re-established (throttled). On a poll-only workspace
             // this poll IS the delivery, not a miss. A session workspace's

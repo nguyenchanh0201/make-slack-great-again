@@ -557,12 +557,14 @@ TEST("live poll: while live only the 60 s safety polls run") {
     fakeslack::pumpFor(1800); // 3 min
     const Log l;
     CHECK(e.be->hasRealtimePush());
-    CHECK(l.count("client.counts") == before.count("client.counts"));
-    CHECK(
-        l.count("subscriptions.thread.getView") + l.count("subscriptions.thread.getTimestamps") ==
-        before.count("subscriptions.thread.getView") +
-            before.count("subscriptions.thread.getTimestamps")
-    );
+    // The Activity badge and Threads: once a minute (10 s / 20 s would be 18 / 9).
+    const int counts = l.count("client.counts") - before.count("client.counts");
+    CHECK(counts >= 2 && counts <= 4);
+    const int threads = l.count("subscriptions.thread.getView") +
+                        l.count("subscriptions.thread.getTimestamps") -
+                        before.count("subscriptions.thread.getView") -
+                        before.count("subscriptions.thread.getTimestamps");
+    CHECK(threads >= 2 && threads <= 4);
     CHECK(l.count("users.conversations") == before.count("users.conversations"));
     const int c1 = l.count("conversations.history", "channel", "C1") -
                    before.count("conversations.history", "channel", "C1");
@@ -593,7 +595,11 @@ TEST("live poll: drop falls back to fast polling, hello backfills once") {
     );
     CHECK(polled.count("client.counts") > down.count("client.counts"));
     CHECK_FALSE(e.be->hasRealtimePush());
-    // The hello after the gap: one roster reload, then the slow cadence.
+    // Hidden for the rest of the gap: the open chat's poll slows to once a
+    // minute, so what follows the new socket's handshake is the backfill.
+    e.be->setWindowVisible(false);
+    // The hello after the gap: one roster reload, one backfill of the open
+    // chat's head page, then the slow cadence.
     REQUIRE(pumpUntil([&] { return e.be->hasRealtimePush(); }, 5000));
     fakeslack::pumpFor(300);
     const Log back;
@@ -602,9 +608,20 @@ TEST("live poll: drop falls back to fast polling, hello backfills once") {
             polled.count("users.conversations", "cursor", "") ==
         1
     );
+    int  backfills = 0;
+    bool reopened  = false;
+    for (json::Value r : back.doc.root()) {
+        if (r["method"].str() == "ws-open") {
+            reopened  = true;
+            backfills = 0;
+        }
+        backfills += reopened && r["method"].str() == "conversations.history" &&
+                     r["form"]["channel"].str() == "C1";
+    }
+    CHECK(backfills == 1);
     fakeslack::pumpFor(1300);
     const Log l;
-    CHECK(l.count("client.counts") == back.count("client.counts"));
+    CHECK(l.count("client.counts") - back.count("client.counts") <= 3);
     CHECK(
         l.count("conversations.history", "channel", "C1") -
             back.count("conversations.history", "channel", "C1") <=
@@ -1060,6 +1077,41 @@ TEST("slack read: identical writes riding the read path are never merged") {
     REQUIRE(pumpUntil([&] { return answered == 3; }));
     fakeslack::pumpFor(300);
     CHECK(Log().count("chat.delete") == 4);
+}
+
+TEST("slack read: writes rate-limited together retry in their original order") {
+    if (!haveServer())
+        return;
+    // Both in flight before either 429 lands (__delay); both answer orders:
+    // W1's first, then W2's first. The cooldown (300 ms) outlasts both.
+    for (const bool w2First : {false, true}) {
+        Env e(nullptr);
+        e.respeed("10");
+        const ConvRef c = e.addChannel("C1");
+        script(
+            "chat.delete",
+            std::string(R"([{"__status": 429, "__headers": {"Retry-After": "3"}, "ok": false,
+                "error": "ratelimited", "__delay": )") +
+                (w2First ? "0.2" : "0.1") +
+                R"(}, {"__status": 429, "__headers": {"Retry-After": "3"}, "ok": false,
+                "error": "ratelimited", "__delay": )" +
+                (w2First ? "0" : "0.2") + "}]"
+        );
+        int  answered = 0;
+        auto del      = [&](const char *ts) {
+            e.be->deleteAgentReply(c, model::parseTs(ts), [&](bool, const std::string &) {
+                ++answered;
+            });
+        };
+        del("1700000100.000000"); // W1
+        REQUIRE(pumpUntil([&] { return Log().count("chat.delete") == 1; }));
+        del("1700000200.000000"); // W2, in flight together
+        REQUIRE(pumpUntil([&] { return answered == 2; }, 3000));
+        Log log;
+        REQUIRE(log.count("chat.delete") == 4);
+        CHECK_STR(log.get("chat.delete", 2)["form"]["ts"].str(), "1700000100.000000");
+        CHECK_STR(log.get("chat.delete", 3)["form"]["ts"].str(), "1700000200.000000");
+    }
 }
 
 TEST("slack read: writes are never merged") {
