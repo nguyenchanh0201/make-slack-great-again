@@ -1,4 +1,5 @@
-// Ctrl/Cmd+K: a popup with a filter field over every conversation.
+// The conversations the unified search jumps to: their order, names and
+// fuzzy filter, and a workspace's tab.
 #pragma once
 
 #include "screens/common/context.h"
@@ -42,6 +43,9 @@ struct QuickSwitchName {
 };
 std::vector<QuickSwitchName>
 quickSwitchNames(const model::Store &store, const std::vector<model::ConvRef> &order);
+// One name's score for a folded query (fuzzyQuery): group DMs half a match
+// behind; none when it doesn't match or has no name yet.
+std::optional<double> quickSwitchScore(const QuickSwitchName &n, const std::vector<uint32_t> &q);
 // quickSwitchFilter over prepared names (parallel to `order`): the same result.
 std::vector<model::ConvRef> quickSwitchFilter(
     std::string_view                    query,
@@ -57,60 +61,6 @@ struct QuickSwitchTab {
     // quickSwitchNames(order), and the store's metaRevision they were made at.
     std::vector<QuickSwitchName> names;
     uint64_t                     namesRev = UINT64_MAX;
-};
-
-// With several workspaces a strip of their bubbles sits above the field,
-// opening on the open one; ←/→ (or Tab) move between them and a click does
-// too. Typing re-aims the tab at the workspace holding the best match (a tab
-// picked by hand while a query is up stays put until it runs dry), and the
-// workspaces with nothing for the query are dimmed.
-class QuickSwitcher : public ui::Popup {
-public:
-    QuickSwitcher(
-        screens::Context           &ctx,
-        Avatars                    &avatars,
-        std::vector<model::ConvRef> order,
-        std::vector<QuickSwitchTab> tabs = {}
-    );
-    ~QuickSwitcher() override;
-    ui::TextEdit                      &field() { return *_field; }
-    const std::vector<model::ConvRef> &results() const { return _results; }
-    void                               choose(int index); // opens results[index] and closes
-    int                                tab() const { return _tab; }
-    void                               setTab(int index); // a click on its bubble
-    void                               stepTab(int delta);
-    // The empty state shown instead of the list ("" while there are results).
-    std::string                        emptyText() const;
-    // A pick in another workspace's tab: switch there, then open it.
-    std::function<void(const std::string &key, model::ConvRef conv)> onChooseIn;
-
-    // Matches with their scores, in the tab's order (best first once ranked).
-    using Scored = std::vector<std::pair<double, model::ConvRef>>;
-
-private:
-    class Rows;
-    friend class Rows;
-    void                                       applyFilter(); // re-aims the tab, then refilter()
-    // `scored`: the tab's matches for the query already (taken).
-    void                                       refilter(Scored *scored = nullptr);
-    void                                       highlight(int index);
-    void                                       refreshStrip();
-    std::optional<double>                      bestScore(QuickSwitchTab &t, std::string_view query);
-    static const std::vector<QuickSwitchName> &names(QuickSwitchTab &t); // brought up to date
-
-    screens::Context           &_ctx;
-    Avatars                    &_avatars;
-    std::vector<QuickSwitchTab> _tabs;
-    int                         _tab       = 0;
-    bool                        _manualTab = false; // picked by hand since typing began
-    std::vector<model::ConvRef> _results;
-    std::vector<bool>           _dimmed;
-    ui::TextEdit               *_field   = nullptr;
-    ui::View                   *_strip   = nullptr;
-    ui::Label                  *_tabName = nullptr, *_empty = nullptr;
-    std::unique_ptr<Rows>       _rows; // the list's adapter
-    ui::VirtualList            *_list    = nullptr;
-    int                         _current = 0;
 };
 
 } // namespace shell

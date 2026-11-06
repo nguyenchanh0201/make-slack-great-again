@@ -389,3 +389,15 @@ TEST("unified search: closing on workspace switch") {
     otherBackend.pending[0].done(Panel::hits(0, 3, "late")); // nothing left to touch
     pump();
 }
+
+TEST("unified search: a reply after close is dropped") {
+    Panel p;
+    p.us->field().insertText("talk");
+    p.waitForSearch();
+    const auto kinds = p.kinds();
+    p.us->close(); // the panel waits in the window's graveyard until the next flush
+    CHECK(p.closed);
+    p.backend.pending[0].done(Panel::hits(p.f.talkAi, 5, "talk"));
+    CHECK(p.kinds() == kinds);
+    pump();
+}

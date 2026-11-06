@@ -17,6 +17,8 @@
 #include "screens/shell/saved_page.h"
 #include "screens/shell/shell.h"
 #include "screens/shell/shell_dialogs.h"
+#include "screens/shell/unified_search.h"
+#include "screens/shell/unified_search_model.h"
 #ifdef MSGA_SELF_UPDATE
 #include "screens/shell/update_bar.h"
 #endif
@@ -323,35 +325,48 @@ TEST("quick switcher: prepared names give the same list; renames still show") {
         CHECK(shell::quickSwitchFilter(q, order, names) == want);
         CHECK(shell::quickSwitchFilter(h.store, q, order) == want);
     }
-    // Through the popup, keystroke by keystroke.
-    h.sh->showQuickSwitcher();
+    // Through the search panel, keystroke by keystroke: its channels are
+    // the unprepared filter's, DMs aside.
+    h.sh->openUnifiedSearch();
     pump();
-    shell::QuickSwitcher *qs = h.sh->quickSwitcher();
+    shell::UnifiedSearch *qs = h.sh->unifiedSearch();
     REQUIRE(qs);
-    const std::vector<ConvRef> shown = shell::quickSwitchOrder(h.store, h.sh->sidebar().visited());
+    using Kind                        = shell::UnifiedSearch::RowKind;
+    const std::vector<ConvRef> shown  = shell::quickSwitchOrder(h.store, h.sh->sidebar().visited());
+    auto                       rowsOf = [&](Kind k) {
+        std::vector<std::string> out;
+        for (const auto &r : qs->rows())
+            if (r.kind == k)
+                out.push_back(r.text);
+        return out;
+    };
     for (const char *typed : {"m", "i", "r", "a"}) {
         qs->field().insertText(typed);
-        CHECK(qs->results() == unpreparedFilter(h.store, qs->field().text(), shown));
+        std::vector<std::string> want;
+        for (ConvRef c : unpreparedFilter(h.store, qs->field().text(), shown))
+            if (!h.store.conversation(c).isDirect() && want.size() < 5)
+                want.push_back(h.store.displayName(c));
+        CHECK(rowsOf(Kind::Channel) == want);
     }
-    // A channel renamed while the switcher is up (Meta): the next keystroke
+    // A channel renamed while the panel is up (Meta): the next keystroke
     // sees the new name.
     qs->field().setText("zqxw");
-    CHECK(qs->results().empty());
+    CHECK(rowsOf(Kind::Channel).empty());
     const ConvRef random = h.conv("C0RANDOM");
     h.store.updateConversation(random, [](Conversation &c) { c.name = "zqxw-room"; });
     qs->field().setText("zqx");
-    REQUIRE(qs->results().size() == 1);
-    CHECK(qs->results()[0] == random);
-    // A person's new name (Users) renames their DM and group DMs too.
+    REQUIRE(rowsOf(Kind::Channel).size() == 1);
+    CHECK_STR(rowsOf(Kind::Channel)[0], h.store.displayName(random));
+    // A person's new name (Users) shows on the next keystroke.
     const ConvRef mira = h.conv("D0MIRA");
     const UserRef u    = h.store.conversation(mira).dmUser;
     REQUIRE(u != kNoUser);
     h.store.user(u).displayName = "Vexilla Q";
     h.store.usersChanged();
     qs->field().setText("vexilla");
-    REQUIRE(!qs->results().empty());
-    CHECK(qs->results()[0] == mira);
-    CHECK(qs->results() == unpreparedFilter(h.store, "vexilla", shown));
+    REQUIRE(!qs->rows().empty());
+    CHECK(qs->rows()[0].kind == Kind::Person);
+    CHECK_STR(qs->rows()[0].text, std::string(h.store.user(u).label()));
     qs->close();
     pump();
 }
@@ -365,15 +380,15 @@ TEST("quick switcher: fuzzy, the placeholder and the empty state") {
     r = shell::quickSwitchFilter(h.store, "lnch", order); // #launch-atlas
     REQUIRE(!r.empty());
     CHECK(r[0] == h.conv("G0LAUNCH"));
-    h.sh->showQuickSwitcher();
+    h.sh->openUnifiedSearch();
     pump();
-    shell::QuickSwitcher *qs = h.sh->quickSwitcher();
+    shell::UnifiedSearch *qs = h.sh->unifiedSearch();
     REQUIRE(qs);
-    CHECK(findIn(qs, "No conversations match.") == nullptr);
     qs->field().insertText("qqqq");
     pump();
-    CHECK(qs->results().empty());
-    CHECK(findIn(qs, "No conversations match.") != nullptr);
+    // No names match: the message search's status row alone.
+    REQUIRE(qs->rows().size() == 1);
+    CHECK(qs->rows()[0].kind == shell::UnifiedSearch::RowKind::Status);
     qs->close();
     pump();
 }

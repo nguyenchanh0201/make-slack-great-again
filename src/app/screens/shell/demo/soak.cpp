@@ -2,9 +2,8 @@
 
 #include "app/diag/mem_stats.h"
 #include "screens/common/context.h"
-#include "screens/shell/message_search.h"
 #include "screens/shell/profile_card.h"
-#include "screens/shell/quick_switcher.h"
+#include "screens/shell/unified_search.h"
 #include "screens/settings/settings_dialog.h"
 #include "screens/shell/shell.h"
 
@@ -88,15 +87,10 @@ void runSoak(
     steps.push_back([shp] { shp->showPage(shell::Shell::Page::Saved); });
     steps.push_back([shp] { shp->showPage(shell::Shell::Page::Scheduled); });
     steps.push_back([shp, start] { shp->open(start); });
-    steps.push_back([shp] { shp->openSearch(); });
+    steps.push_back([shp] { shp->openUnifiedSearch(); });
     steps.push_back([shp] {
-        if (shp->messageSearch())
-            shp->messageSearch()->hideNow();
-    });
-    steps.push_back([shp] { shp->showQuickSwitcher(); });
-    steps.push_back([shp] {
-        if (shp->quickSwitcher())
-            shp->quickSwitcher()->close();
+        if (shp->unifiedSearch())
+            shp->unifiedSearch()->close();
     });
     steps.push_back([shp] { shp->openSettings(); });
     steps.push_back([shp] {

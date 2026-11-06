@@ -46,10 +46,9 @@ class ThreadsPage;
 class ConvTabs;
 class HuddleBanner;
 class Menus;
-class MessageSearch;
 class ProfileCards;
-class QuickSwitcher;
 class ThreadArea;
+class UnifiedSearch;
 class TypingIndicator;
 class UpdateBar;
 class WorkspaceStack;
@@ -161,18 +160,17 @@ public:
     void           purgeHistory(const std::string &key);
     model::ConvRef current() const { return _current; }
     bool           threadOpen() const;
-    void           showQuickSwitcher();
     // Back/forward through the conversations opened (NavBack/NavForward),
     // switching workspaces where an entry is another's; false when there is
     // nowhere to go.
     bool           navigateHistory(bool back);
     // CloseFrontmost: the top dialog, else Settings, else the window.
     void           closeFrontmost();
-    // SearchMessages and the header's search button: toggle the search
-    // overlay over the message area.
-    void           openSearch();
-    MessageSearch *messageSearch() const { return _search; }
-    QuickSwitcher *quickSwitcher() const { return _switcher; }
+    // The title strip's search bar, SearchMessages, QuickSwitch and the
+    // header's search button: the unified search panel, under the bar.
+    void           openUnifiedSearch();
+    UnifiedSearch *unifiedSearch() const { return _unified; }
+    ui::Clickable *searchBar() const { return _searchBar; }
     void           showCanvas(bool on); // the header's tabs
     void           lookUpCanvas(model::ConvRef conv);
     CanvasPage    &canvasPage() const { return *_canvas; }
@@ -481,6 +479,7 @@ private:
     ui::View              *_titleBar = nullptr, *_rail = nullptr;
     float                  _titleBarH  = 0;       // buildTitleBar
     ui::Label             *_titleLabel = nullptr; // macOS: the workspace, without a header
+    ui::Clickable         *_searchBar  = nullptr; // "Search <workspace>"
     WorkspaceStack        *_wsStack    = nullptr;
     std::vector<Workspace> _workspaces;
     std::string            _activeKey;
@@ -498,8 +497,7 @@ private:
     ui::View                     *_welcome  = nullptr; // the shortcuts panel (no conversation open)
     ui::View                     *_splitter = nullptr;
     ThreadArea                   *_thread   = nullptr;
-    QuickSwitcher                *_switcher = nullptr;
-    MessageSearch                *_search   = nullptr;
+    UnifiedSearch                *_unified  = nullptr;
     std::unique_ptr<Menus>        _menus;
     std::unique_ptr<ProfileCards> _profiles;
 

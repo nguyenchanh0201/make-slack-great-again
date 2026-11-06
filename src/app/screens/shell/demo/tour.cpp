@@ -7,7 +7,7 @@
 #include "screens/common/context.h"
 #include "screens/settings/settings_dialog.h"
 #include "screens/shell/header.h"
-#include "screens/shell/message_search.h"
+#include "screens/shell/unified_search.h"
 #include "screens/shell/shell.h"
 
 #include <cinttypes>
@@ -472,25 +472,31 @@ void Tour::run(const TourStep &step, Done done) {
         return;
 
     case K::Search:
-        _sh.openSearch();
+        _sh.openUnifiedSearch();
         after(300, [this, query = step.arg, done] {
             // Onto the results, where the eye goes next.
-            moveTo(centerOf(_sh.messageSearch()), [this, query, done] {
+            moveTo(centerOf(_sh.unifiedSearch()), [this, query, done] {
                 typeText(query, 18, [this, done] {
-                    after(250, [this, done] { pressKey(plat::Key::Enter, done); });
+                    // Past the debounce, every message hit.
+                    after(600, [this, done] {
+                        if (_sh.unifiedSearch())
+                            _sh.unifiedSearch()->showAllMessages();
+                        done();
+                    });
                 });
             });
         });
         return;
 
     case K::CloseSearch:
-        _sh.messageSearch()->close();
+        if (_sh.unifiedSearch())
+            _sh.unifiedSearch()->close();
         done();
         return;
 
     case K::QuickSwitch:
         park([this, text = step.arg, done] {
-            _sh.showQuickSwitcher();
+            _sh.openUnifiedSearch();
             after(300, [this, text, done] {
                 typeText(text, 16, [this, done] {
                     after(250, [this, done] { pressKey(plat::Key::Enter, done); });

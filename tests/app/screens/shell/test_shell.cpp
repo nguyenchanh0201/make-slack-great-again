@@ -35,6 +35,7 @@
 #include "screens/shell/shell_dialogs.h"
 #include "ui/controls.h"
 #include "screens/shell/quick_switcher.h"
+#include "screens/shell/unified_search.h"
 #include "screens/shell/shortcuts.h"
 #include "screens/shell/shell.h"
 #include "screens/settings/settings_dialog.h"
@@ -479,17 +480,19 @@ TEST("quick switcher: filters by name, best match first") {
     CHECK(r[0] == h.conv("C0ENG"));
     CHECK(shell::quickSwitchFilter(h.store, "zzz", order).empty());
 
-    // Through the popup: typing filters, Enter opens.
-    h.sh->showQuickSwitcher();
+    // Through the search panel: typing filters the channels, Enter opens.
+    h.sh->openUnifiedSearch();
     pump();
-    shell::QuickSwitcher *qs = h.sh->quickSwitcher();
-    REQUIRE(qs);
-    qs->field().insertText("rand");
-    REQUIRE(qs->results().size() == 1);
-    qs->choose(0);
+    shell::UnifiedSearch *us = h.sh->unifiedSearch();
+    REQUIRE(us);
+    us->field().insertText("rand");
+    REQUIRE(!us->rows().empty());
+    REQUIRE(us->rows()[0].kind == shell::UnifiedSearch::RowKind::Channel);
+    CHECK_STR(us->rows()[0].text, h.store.displayName(h.conv("C0RANDOM")));
+    us->choose(0);
     pump();
     CHECK(h.sh->current() == h.conv("C0RANDOM"));
-    CHECK(h.sh->quickSwitcher() == nullptr);
+    CHECK(h.sh->unifiedSearch() == nullptr);
 }
 
 TEST("quick switcher: named conversations — members, live peers, most recent first") {
@@ -3410,19 +3413,16 @@ TEST("thread panel: at full width, whatever needs the messages brings them back"
     REQUIRE(full());
     ui::View *f = h.win->focusView();
     CHECK(f && area->isAncestorOf(f));
-    // The search opens over the messages, shown and focused.
-    h.sh->openSearch();
+    // The search panel opens over the full thread, focused; closed, the
+    // focus is back in the thread.
+    h.sh->openUnifiedSearch();
     pump();
-    CHECK(messages->visible());
-    f = h.win->focusView();
-    CHECK(f && messages->isAncestorOf(f) && !h.sh->composer().isAncestorOf(f));
-    // Going full again closes that search: the next one opens rather than closes.
-    REQUIRE(full());
-    h.sh->openSearch();
+    REQUIRE(h.sh->unifiedSearch());
+    CHECK(h.sh->unifiedSearch()->field().focused());
+    h.sh->unifiedSearch()->close();
     pump();
-    CHECK(messages->visible());
     f = h.win->focusView();
-    CHECK(f && messages->isAncestorOf(f) && !h.sh->composer().isAncestorOf(f));
+    CHECK(f && area->isAncestorOf(f));
     // The header's tabs, the same conversation picked again, a jump in it.
     REQUIRE(full());
     h.sh->showCanvas(false);
@@ -3475,7 +3475,7 @@ TEST("thread panel: a window too narrow for both covers the messages, a wider on
     CHECK(panel->closeButton()->visible());
 #endif
     // Narrowed under a modal popup, the focus stays in the popup.
-    h.sh->showQuickSwitcher();
+    h.sh->openUnifiedSearch();
     pump();
     ui::Popup *qs = h.win->topPopup();
     REQUIRE(qs);
@@ -3490,14 +3490,6 @@ TEST("thread panel: a window too narrow for both covers the messages, a wider on
     w.setSize({1600, 900});
     pump();
     REQUIRE(messages->visible());
-    // Narrow again, the messages are only back with the thread closed.
-    w.setSize({640, 600});
-    pump();
-    REQUIRE(!messages->visible());
-    h.sh->openSearch();
-    pump();
-    CHECK(messages->visible());
-    CHECK_FALSE(h.sh->threadOpen());
 }
 
 TEST("thread panel: Esc closes it once the focused view has no use for the key") {
@@ -3527,7 +3519,7 @@ TEST("thread panel: Esc closes it once the focused view has no use for the key")
     // A modal popup goes first; the thread stays for the next Esc.
     h.sh->openThread(design, root);
     pump();
-    h.sh->showQuickSwitcher();
+    h.sh->openUnifiedSearch();
     pump();
     ui::Popup *p = h.win->topPopup();
     REQUIRE(p);
@@ -3639,12 +3631,19 @@ TEST("tray: on macOS the plane is a template the menu bar tints") {
 #endif
 }
 
-TEST("workspaces: the quick switcher has a tab per workspace; ←/→ and typing move it") {
+TEST("workspaces: the search panel has a tab per workspace; ←/→ and typing move it") {
     TwoWorkspaces w;
-    w.sh->showQuickSwitcher();
+    w.sh->openUnifiedSearch();
     pump();
-    shell::QuickSwitcher *qs = w.sh->quickSwitcher();
+    shell::UnifiedSearch *qs = w.sh->unifiedSearch();
     REQUIRE(qs);
+    using Kind    = shell::UnifiedSearch::RowKind;
+    auto channels = [&] {
+        size_t n = 0;
+        for (const auto &r : qs->rows())
+            n += r.kind == Kind::Channel;
+        return n;
+    };
     CHECK(qs->tab() == 0); // the open one's
     CHECK(showsText(
         w.win->topPopup(),
@@ -3663,23 +3662,60 @@ TEST("workspaces: the quick switcher has a tab per workspace; ←/→ and typing
     // Only the second workspace has it: the tab follows the query.
     qs->field().insertText("second-des");
     CHECK(qs->tab() == 1);
-    REQUIRE(qs->results().size() == 1);
-    // Back on the first by hand: nothing here, the others have some.
+    REQUIRE(channels() == 1);
+    // Back on the first by hand: nothing here.
     press(*w.win, plat::Key::Left);
     CHECK(qs->tab() == 0);
-    CHECK(qs->results().empty());
-    CHECK_STR(qs->emptyText(), "No matches in Lumen Studio. Other workspaces have some.");
-    qs->field().insertText("zzz");
-    CHECK_STR(qs->emptyText(), "No conversations match.");
+    CHECK(channels() == 0);
     // A pick in another workspace's tab switches there and opens it.
     qs->field().setText("second-des"); // runs dry here: the tab moves on
     CHECK(qs->tab() == 1);
-    REQUIRE(qs->results().size() == 1);
+    REQUIRE(channels() == 1);
+    REQUIRE(qs->rows()[0].kind == Kind::Channel);
     qs->choose(0);
     pump();
     REQUIRE(w.switched.size() == 1);
     CHECK_STR(w.switched[0], kKeyB);
     CHECK(w.sh->current() == w.b.findConversation("C0DESIGN"));
+}
+
+TEST("search bar: shows the workspace name") {
+    Harness h;
+    h.store.workspaceName = "CODE LEAP";
+    h.sh->workspaceChanged();
+    pump();
+    ui::Clickable *bar = h.sh->searchBar();
+    REQUIRE(bar);
+    CHECK(showsText(bar, "Search CODE LEAP"));
+    h.sh->setSignedIn(false);
+    pump();
+    CHECK(showsText(bar, "Search msga"));
+    h.sh->setSignedIn(true);
+}
+
+TEST("search bar: a person row opens a DM in the right workspace") {
+    TwoWorkspaces w;
+    User          z;
+    z.id = "U0ZORRO01", z.name = "zorro", z.displayName = "Zorro Quill";
+    const UserRef zorro = w.b.addUser(std::move(z));
+    w.b.usersChanged();
+    std::vector<std::pair<UserRef, const Store *>> messaged;
+    w.ctx.messageUser = [&](UserRef u) { messaged.push_back({u, &w.ctx.store()}); };
+    w.sh->openUnifiedSearch();
+    pump();
+    shell::UnifiedSearch *us = w.sh->unifiedSearch();
+    REQUIRE(us);
+    us->setTab(1);
+    us->field().insertText("zorro");
+    REQUIRE(!us->rows().empty());
+    REQUIRE(us->rows()[0].kind == shell::UnifiedSearch::RowKind::Person);
+    us->choose(0);
+    pump();
+    REQUIRE(w.switched.size() == 1);
+    CHECK_STR(w.switched[0], kKeyB);
+    REQUIRE(messaged.size() == 1);
+    CHECK(messaged[0].first == zorro);
+    CHECK(messaged[0].second == &w.b);
 }
 
 TEST("workspaces: Workspace admin for a background workspace you administer") {
@@ -4121,11 +4157,11 @@ TEST("title bar: controls take their presses, empty space drags the window") {
     // content, its title centred in the window.
     CHECK(search.y < 40);
     CHECK(at(search) == H::Client);
-    CHECK(at(centre(hd.title())) == H::Caption);
     const ui::RectF t = hd.title()->windowRect();
     CHECK(std::abs(t.x + t.w / 2 - 600) < 1);
-    CHECK(at({400, 20}) == H::Caption); // empty header space
-    CHECK(at({600, 2}) == H::Caption);  // its edges too: AppKit resizes from its own zone
+    CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar, over the title
+    CHECK(at({40, 20}) == H::Caption);                 // empty space by the traffic lights
+    CHECK(at({600, 2}) == H::Caption); // its edges too: AppKit resizes from its own zone
     CHECK(at({2, 20}) == H::Caption);
     CHECK(at({2, 300}) == H::ResizeLeft);
     // Settings blocks the header's actions; its backdrop still drags.
@@ -4140,6 +4176,6 @@ TEST("title bar: controls take their presses, empty space drags the window") {
     // The 22 px strip above the header: caption, but for its own buttons.
     CHECK(search.y > 22);
     CHECK(at(search) == H::Client);
-    CHECK(at({400, 11}) == H::Caption);
+    CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar fills the strip
 #endif
 }

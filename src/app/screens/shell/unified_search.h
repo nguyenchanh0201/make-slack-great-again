@@ -58,7 +58,7 @@ public:
     void                    showAllMessages(); // every hit for the query, no second request
     bool                    showingAll() const { return _all; }
     int                     tab() const { return _tab; }
-    void                    setTab(int index); // as QuickSwitcher
+    void                    setTab(int index); // a click on its bubble
     void                    stepTab(int delta);
 
     // Outlets (`key`: the selected tab's workspace).
@@ -70,6 +70,9 @@ public:
     static constexpr double kDebounceMs = 300;
 
     bool tick(double nowMs) override; // the message search's debounce
+    // Closed: a search still out (or pending) is dropped, as the panel lingers
+    // in the window's graveyard until the next flush.
+    void willClose() override;
 
 private:
     class Adapter;

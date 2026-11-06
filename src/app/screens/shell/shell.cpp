@@ -22,11 +22,9 @@
 #include "screens/shell/context_menus.h"
 #include "screens/shell/header.h"
 #include "screens/shell/huddle_banner.h"
-#include "screens/shell/message_search.h"
 #include "screens/shell/nav_chrome.h"
 #include "screens/shell/profile_card.h"
 #include "screens/shell/shell_dialogs.h"
-#include "screens/shell/quick_switcher.h"
 #include "screens/shell/session_status_dialog.h"
 #include "screens/shell/teammate_page.h"
 #include "screens/shell/overview_page.h"
@@ -34,6 +32,7 @@
 #include "screens/shell/scheduled_page.h"
 #include "screens/shell/activity_page.h"
 #include "screens/shell/threads_page.h"
+#include "screens/shell/unified_search.h"
 #include "screens/shell/shortcuts.h"
 #include "screens/shell/shell_text.h"
 #include "screens/shell/sidebar_footer.h"
@@ -77,6 +76,7 @@ namespace {
 // The unified header (NSWindowToolbarStyleUnifiedCompact), where AppKit
 // does not say how tall its title bar is.
 constexpr float kMacTitleBarH = 38;
+constexpr int kHeaderSlot = 1; // in the title strip: over the fallback title, under the search bar
 #else
 constexpr float kTitleBarH = 22; // the compact title strip (Linux/Windows)
 #endif
@@ -1060,8 +1060,8 @@ Shell::Shell(
     shortcuts::install(win, Id::NavForward, [this] { navigateHistory(false); });
     shortcuts::install(win, Id::CloseFrontmost, [this] { closeFrontmost(); });
     shortcuts::install(win, Id::CloseThread, [this] { closeThreadOnEscape(); });
-    shortcuts::install(win, Id::SearchMessages, [this] { openSearch(); });
-    shortcuts::install(win, Id::QuickSwitch, [this] { showQuickSwitcher(); });
+    shortcuts::install(win, Id::SearchMessages, [this] { openUnifiedSearch(); });
+    shortcuts::install(win, Id::QuickSwitch, [this] { openUnifiedSearch(); });
     win.keyFilter = [this](const Event &e) {
         noteActivity();
         if (removeIdleSession(e))
@@ -1397,6 +1397,27 @@ public:
     std::function<void()>       onStyleChanged; // a theme or palette switch
 };
 
+// The title strip's "Search <workspace>" (Slack's wide bar): a press opens the
+// unified search under it.
+class SearchBar final : public Clickable {
+public:
+    explicit SearchBar(float h) {
+        style().row().flex(1).height(h).padding(10, 0).spacing(6).items(Align::Center);
+        add<IconView>(Icon::Search, 14, C::TitleBarControl)->setHitTransparent(true);
+        _text = add<Label>("", Font::Control, C::TitleBarControl);
+        _text->setMaxLines(1);
+        _text->setHitTransparent(true);
+        _text->style().flex(1);
+    }
+    void setText(std::string t) { _text->setText(std::move(t)); }
+    void paint(gfx::Painter &p) override {
+        p.fillRoundRect(bounds(), 6, gfx::withAlpha(0xffffffff, hovered() ? 0.7f : 0.55f));
+    }
+
+private:
+    Label *_text = nullptr;
+};
+
 void Shell::buildTitleBar(View *parent) {
     auto *strip = parent->add<TitleStrip>();
     _titleBar   = strip;
@@ -1414,11 +1435,20 @@ void Shell::buildTitleBar(View *parent) {
     _titleLabel->setAlign(text::LayoutOptions::Align::Center);
     _titleLabel->setHitTransparent(true);
     _titleLabel->style().margins(112, 0, 112, 1);
+    // Clear of the traffic lights; on the right, shortcut: room for the unified
+    // header's actions while it shares the strip (Task 4 moves it out).
+    View *row = _titleBar->add<View>();
+    row->style().row().items(Align::Center).padding(80, 0, 200, 0);
+    row->setHitTransparent(true);
 #else
     _titleBarH = kTitleBarH;
     _titleBar->style().row().height(kTitleBarH).noShrink().items(Align::Center);
-    _titleBar->add<View>()->style().flex(1);
+    View *row = _titleBar; // the window controls follow
 #endif
+    auto *bar = row->add<SearchBar>(std::max(_titleBarH - 12, 18.f));
+    bar->style().margins(8, 0, 8, 0);
+    bar->onClick          = [this] { openUnifiedSearch(); };
+    _searchBar            = bar;
     strip->onStyleChanged = [this] { syncChrome(); };
     syncChrome();
 #ifndef __APPLE__ // macOS keeps its traffic lights
@@ -1504,7 +1534,7 @@ void Shell::syncFullScreenChrome() {
     std::unique_ptr<View> h = _header->parent()->remove(_header);
     // Over the pane it keeps the strip's height, the tabs right under it.
     h->style().height(_titleBarH).noShrink();
-    to->adopt(std::move(h), full ? 0 : -1);
+    to->adopt(std::move(h), full ? 0 : kHeaderSlot);
     _titleBar->setVisible(!full);
 #endif
 }
@@ -1576,12 +1606,14 @@ void Shell::buildMain(View *parent) {
     _mainPane->style().minW = 360;
 
 #ifdef __APPLE__
-    // The header is the unified title bar's.
-    _header = _titleBar->add<ConvHeader>(_ctx, _avatars);
+    // The header is the unified title bar's, under the search bar.
+    _header = static_cast<ConvHeader *>(
+        _titleBar->adopt(std::make_unique<ConvHeader>(_ctx, _avatars), kHeaderSlot)
+    );
 #else
     _header = _mainPane->add<ConvHeader>(_ctx, _avatars);
 #endif
-    _header->onSearch     = [this] { openSearch(); };
+    _header->onSearch     = [this] { openUnifiedSearch(); };
     _tabs                 = _mainPane->add<ConvTabs>();
     _tabs->onSelect       = [this](int tab) { showCanvas(tab == 1); };
     // The huddle banner: under the tabs, over the messages.
@@ -1666,14 +1698,6 @@ void Shell::buildMain(View *parent) {
     _typing     = area->add<TypingIndicator>(_ctx);
     _composer   = area->add<Composer>(_ctx, _drafts);
     _composer->setEnabled(false); // until a conversation is open
-    _search           = areaHost->add<MessageSearch>(_ctx);
-    // A result: the conversation opened the usual way, then the
-    // jump (it waits for the first page if that is still loading).
-    _search->onResult = [this](ConvRef conv, Ts ts) { jumpToMessage(conv, ts, 0); };
-    _search->onHidden = [this] {
-        if (_current != kNoConv)
-            _composer->edit().focus();
-    };
 
     _splitter = body->add<Splitter>([this, body, from = 0.f](float dx, bool pressed) mutable {
         // The splitter: within the range ThreadBody lays the panel out in;
@@ -1686,7 +1710,7 @@ void Shell::buildMain(View *parent) {
         const float want    = from - dx;
         const bool  full    = want >= hi + ThreadBody::kSnapW;
         if (full && !body->full()) {
-            body->setFull(true); // onCoveringChanged sees to the search and focus
+            body->setFull(true); // onCoveringChanged sees to the focus
         } else if (!full) {
             body->setFull(false);
             _settings.threadWidth = int(std::clamp(want, lo, hi));
@@ -1707,10 +1731,9 @@ void Shell::buildMain(View *parent) {
         _thread->setCovering(on);
         if (!on)
             return;
-        // The messages went: their search with them, and a focus held there
-        // (hiding them dropped it) moves to the thread's composer instead of
-        // nowhere. A focus elsewhere (a dialog, the sidebar) stays put.
-        _search->hideNow();
+        // The messages went: a focus held there (hiding them dropped it)
+        // moves to the thread's composer instead of nowhere. A focus
+        // elsewhere (a dialog, the sidebar) stays put.
         Composer *c = _thread->composer;
         if (!_win.focusView() && c->visible() && c->enabled())
             c->edit().focus();
@@ -1924,7 +1947,6 @@ void Shell::open(ConvRef conv) {
         return;
     leaveTeammate(); // the teammate page keeps what was typed to it
     leavePages();
-    _search->hideNow();
     showMessageArea();
     if (conv != _current && threadOpen())
         closeThread(); // a leave path: the thread composer stashes its draft
@@ -1974,7 +1996,6 @@ void Shell::leaveWorkspace() {
         _savedPage->clear();
     if (_scheduledPage)
         _scheduledPage->clear();
-    _search->reset(); // another workspace: the query and results go
     if (threadOpen())
         closeThread(); // a leave path: the thread composer stashes its draft
     if (_thread)
@@ -2109,10 +2130,10 @@ bool Shell::navInput(const plat::Event &e) {
 }
 
 // The topmost dialog: a modal dialog (a Dialog covers the window) or the
-// quick switcher; not the Settings panel, which is kept apart.
+// search panel; not the Settings panel, which is kept apart.
 Popup *Shell::topDialog() const {
     return _win.topPopup([this](const Popup &p) {
-        return &p == _switcher || (p.place() == Popup::Place::Fill && &p != _settingsDlg);
+        return &p == _unified || (p.place() == Popup::Place::Fill && &p != _settingsDlg);
     });
 }
 
@@ -2132,15 +2153,8 @@ void Shell::closeFrontmost() {
         _win.onCloseRequested();
 }
 
-void Shell::openSearch() {
-    if (!_signedIn)
-        return;
-    showMessageArea(); // the search sits over the messages
-    _search->toggle();
-}
-
 // The messages back beside a full-width thread panel: for whatever needs them
-// on screen (a conversation opened, the search, the canvas tab, a jump). A
+// on screen (a conversation opened, the canvas tab, a jump). A
 // window too narrow for both shows them only with the thread closed.
 void Shell::showMessageArea() {
     if (!_thread)
@@ -2355,7 +2369,6 @@ void Shell::showPage(Page p) {
 }
 
 void Shell::leaveConversationChrome(bool keepComposer) {
-    _search->hideNow();
     if (threadOpen())
         closeThread();
     _composer->setTarget(kNoConv, 0); // stashes the conversation's draft
@@ -3197,11 +3210,13 @@ void Shell::refreshRail() {
     _addBtn->style().margins(0, _wsStack->count() ? 16 : 0, 0, 0);
     _wsStack->update();
     updateAttention();
-    // The title: the open workspace's name, "msga" without one.
-    if (_titleLabel) {
-        const std::string &name = _ctx.store().workspaceName;
-        _titleLabel->setText(_signedIn && !name.empty() ? name : std::string(tr("msga")));
-    }
+    // The title and the search bar: the open workspace's name, "msga" without one.
+    const std::string &ws   = _ctx.store().workspaceName;
+    const std::string  name = _signedIn && !ws.empty() ? ws : std::string(tr("msga"));
+    if (_titleLabel)
+        _titleLabel->setText(name);
+    if (_searchBar)
+        static_cast<SearchBar *>(_searchBar)->setText(i18n::arg(tr("Search %1"), name));
 }
 
 // ── Running workspaces ──────────────────────────────────────────────────────
@@ -3264,8 +3279,8 @@ void Shell::detachWorkspace(const std::string &key) {
     // Dialogs that reach every workspace let it go.
     if (_forward)
         _forward->close();
-    if (_switcher)
-        _switcher->close();
+    if (_unified)
+        _unified->close(); // its tabs point into every workspace's Store
     if (RailTile *t = _wsStack->find(key); t && key != _activeKey)
         t->setDot(0);
     updateAttention();
@@ -3552,38 +3567,73 @@ void Shell::applySettings() {
     updateAttention();
 }
 
-void Shell::showQuickSwitcher() {
-    // Not over another dialog (nor over itself): the switcher navigates the
+void Shell::openUnifiedSearch() {
+    // Not over another dialog (nor over itself): the panel navigates the
     // window behind the backdrop.
-    if (topDialog())
+    if (!_signedIn || topDialog())
         return;
-    // One tab per running workspace, in the rail's order, each listing its
-    // member conversations by name (the visit stamps are app-wide).
-    std::vector<QuickSwitchTab> tabs;
+    // One tab per running workspace, in the rail's order, each with its
+    // member conversations most recent first (the visit stamps are app-wide).
+    std::vector<QuickSwitchTab>   tabs;
+    std::vector<model::Backend *> backends;
+    int                           openTab = -1;
     for (const LiveWorkspace &w : liveWorkspaces()) {
-        tabs.push_back({w.key, w.name, w.icon, w.store, {}});
-        if (w.store != &_ctx.store()) // the open one's comes in below
-            tabs.back().order = quickSwitchOrder(*w.store, _sidebar->visited());
+        if (w.store == &_ctx.store())
+            openTab = int(tabs.size());
+        tabs.push_back(
+            {w.key, w.name, w.icon, w.store, quickSwitchOrder(*w.store, _sidebar->visited())}
+        );
+        backends.push_back(w.backend);
     }
-    auto p = std::make_unique<QuickSwitcher>(
-        _ctx, _avatars, quickSwitchOrder(_ctx.store(), _sidebar->visited()), std::move(tabs)
+    if (openTab < 0) { // the demo, tests: the open workspace alone
+        tabs     = {QuickSwitchTab{
+            _activeKey, {}, {}, &_ctx.store(), quickSwitchOrder(_ctx.store(), _sidebar->visited())
+        }};
+        backends = {&_ctx.backend};
+        openTab  = 0;
+    }
+    auto p = std::make_unique<UnifiedSearch>(
+        _ctx, _avatars, std::move(tabs), openTab, [backends](int tab) {
+            return backends[size_t(tab)];
+        }
     );
-    auto *raw       = p.get();
-    raw->onChooseIn = [this](const std::string &key, ConvRef conv) {
-        // The same path as a notification's click: the workspace, then the chat.
-        if (onSwitchWorkspace)
+    auto *raw   = p.get();
+    // A pick in another workspace's tab goes the way a notification's click
+    // does: the workspace first. False: it isn't the open one after all.
+    auto  reach = [this](const std::string &key) {
+        if (const Running *r = findRunning(key);
+            r && r->store != &_ctx.store() && onSwitchWorkspace)
             onSwitchWorkspace(key);
         const Running *r = findRunning(key);
-        if (r && r->store == &_ctx.store() && _signedIn)
+        return _signedIn && (!r || r->store == &_ctx.store());
+    };
+    raw->onOpenConv = [this, reach](const std::string &key, ConvRef conv) {
+        if (reach(key))
             open(conv);
     };
-    const SizeF ws = _win.size();
-    p->setAnchor({(ws.w - 520) / 2, 90, 520, 0}, Popup::Place::Below);
-    p->onClosed = [this, raw] {
-        if (_switcher == raw)
-            _switcher = nullptr;
+    raw->onOpenPage    = [this](Page page) { showPage(page); };
+    raw->onMessageUser = [this, reach](const std::string &key, model::UserRef u) {
+        if (reach(key) && _ctx.messageUser)
+            _ctx.messageUser(u);
     };
-    _switcher = raw;
+    // The conversation opened the usual way, then the jump (it waits for the
+    // first page if that is still loading).
+    raw->onOpenMessage = [this, reach](const std::string &key, ConvRef conv, Ts ts) {
+        if (reach(key))
+            jumpToMessage(conv, ts, 0);
+    };
+    // Under the bar; centred near the top while the title bar is hidden.
+    if (_searchBar && titleBarHeight() > 0) {
+        p->setAnchor(_searchBar->windowRect(), Popup::Place::Below);
+    } else {
+        const SizeF ws = _win.size();
+        p->setAnchor({(ws.w - 600) / 2, 0, 600, 0}, Popup::Place::Below);
+    }
+    p->onClosed = [this, raw] {
+        if (_unified == raw)
+            _unified = nullptr;
+    };
+    _unified = raw;
     _win.showPopup(std::move(p));
     raw->field().focus();
 }
@@ -3641,6 +3691,8 @@ plat::HitArea Shell::hitTest(plat::Point p) const {
     }
     return H::Client; // in a popup over the band (a menu, a card)
 #endif
+    if (_searchBar && _searchBar->windowRect().contains(pt))
+        return H::Client;
     if (_pinBtn && _pinBtn->windowRect().contains(pt))
         return H::Client;
     if (_minBtn && _minBtn->windowRect().contains(pt))

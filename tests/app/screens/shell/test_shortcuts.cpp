@@ -12,15 +12,16 @@
 #include "screens/shell/composer.h"
 #include "screens/shell/header.h"
 #include "screens/shell/message_search.h"
-#include "screens/shell/quick_switcher.h"
 #include "screens/shell/shell.h"
 #include "screens/shell/shortcuts.h"
+#include "screens/shell/unified_search.h"
 
 #ifdef MSGA_HAVE_MESSAGES
 #include "app/screens/messages/emoji_picker.h"
 #include "app/screens/messages/image_cache.h"
 #endif
 
+#include <chrono>
 #include <cstring>
 #include <memory>
 
@@ -129,7 +130,7 @@ TEST("shortcuts: one row per action, the help panel's rows in order") {
     const char *help[] = {
         "Open settings",
         "Jump to a conversation",
-        "Search messages",
+        "Search",
         "Send message",
         "New line in message",
         "Edit last message",
@@ -212,33 +213,34 @@ TEST("shortcuts: tooltips and chips spell the keys per platform") {
 
 // ── Window scope ────────────────────────────────────────────────────────────
 
-TEST("shortcuts: Ctrl+K opens the switcher once, Enter opens the pick, Ctrl+W closes it") {
+TEST("shortcuts: Ctrl+K opens the search once, Enter opens the pick, Ctrl+W closes it") {
     Harness h;
     REQUIRE(h.edit().focused()); // the composer holds focus
     h.chord(kCtrl, K::K);
-    auto *sw = h.sh->quickSwitcher();
+    auto *sw = h.sh->unifiedSearch();
     REQUIRE(sw != nullptr);
     CHECK(h.win->topPopup() == sw);
     h.chord(kCtrl, K::K); // not over itself
-    CHECK(h.sh->quickSwitcher() == sw);
+    CHECK(h.sh->unifiedSearch() == sw);
     // Ctrl+B in its field is no formatting key.
     h.chord(kCtrl, K::B);
     CHECK_FALSE(sw->field().formatActive(ui::TextEdit::Bold));
     h.chord(0, K::E); // headless types US text for letters
     h.chord(0, K::N);
     h.chord(0, K::G);
-    REQUIRE(!sw->results().empty());
-    const ConvRef want = sw->results()[0];
+    REQUIRE(!sw->rows().empty());
+    REQUIRE(sw->rows()[0].kind == shell::UnifiedSearch::RowKind::Channel);
+    const std::string want = sw->rows()[0].text;
     h.chord(kShift, K::Enter); // any modifiers
     pump();
-    CHECK(h.sh->current() == want);
-    CHECK(h.sh->quickSwitcher() == nullptr);
+    CHECK_STR(h.store.displayName(h.sh->current()), want);
+    CHECK(h.sh->unifiedSearch() == nullptr);
 
     h.chord(kCtrl, K::K);
-    REQUIRE(h.sh->quickSwitcher() != nullptr);
+    REQUIRE(h.sh->unifiedSearch() != nullptr);
     h.chord(kCtrl, K::W);
     pump();
-    CHECK(h.sh->quickSwitcher() == nullptr);
+    CHECK(h.sh->unifiedSearch() == nullptr);
     CHECK(h.closeRequests == 0); // the dialog went, not the window
 }
 
@@ -255,93 +257,133 @@ TEST("shortcuts: Ctrl+, opens Settings, Ctrl+W closes it, then the window") {
     CHECK(h.closeRequests == 1); // nothing open: the window's close (hide to tray)
 }
 
-TEST("shortcuts: Ctrl+F toggles the message search over the chat, the composer left alone") {
+TEST("search bar: a click, ⌘F and ⌘K open the same panel") {
+    Harness        h;
+    ui::Clickable *bar = h.sh->searchBar();
+    REQUIRE(bar);
+    // The bar takes its presses; the empty strip beside it drags the window.
+    const ui::RectF r = bar->windowRect();
+    CHECK(r.w > 200);
+    CHECK(h.sh->hitTest({r.x + r.w / 2, r.y + r.h / 2}) == plat::HitArea::Client);
+#ifdef __APPLE__
+    CHECK(h.sh->hitTest({r.x - 4, r.y + r.h / 2}) == plat::HitArea::Caption);
+#endif
+    auto opens = [&](const std::function<void()> &how) {
+        how();
+        pump();
+        shell::UnifiedSearch *us = h.sh->unifiedSearch();
+        REQUIRE(us != nullptr);
+        CHECK(h.win->topPopup() == us);
+        CHECK(us->field().focused());
+        h.chord(kCtrl, K::F); // a second ⌘F keeps the one panel
+        CHECK(h.sh->unifiedSearch() == us);
+        CHECK(h.win->topPopup() == us);
+        us->close();
+        pump();
+        CHECK(h.sh->unifiedSearch() == nullptr);
+    };
+    opens([&] { bar->onClick(); });
+    opens([&] { h.chord(kCtrl, K::F); });
+    opens([&] { h.chord(kCtrl, K::K); });
+    opens([&] { h.sh->header().search()->onClick(); }); // the header's button too
+}
+
+TEST("shortcuts: Ctrl+F opens the search panel, the composer left alone; Esc closes it") {
     Harness h;
     h.edit().insertText("draft");
     h.chord(kCtrl, K::F);
-    shell::MessageSearch *s = h.sh->messageSearch();
+    shell::UnifiedSearch *s = h.sh->unifiedSearch();
     REQUIRE(s != nullptr);
-    CHECK(s->shown());
-    CHECK(h.win->topPopup() == nullptr); // an overlay in the window, not a popup
     CHECK(s->field().focused());
     CHECK_STR(h.edit().text(), "draft");
     CHECK(h.closeRequests == 0);
-    CHECK_FALSE(s->list()->visible()); // no results before a search
-    h.chord(kCtrl, K::F);              // Ctrl+F again hides it at once
-    CHECK_FALSE(s->visible());
-    CHECK(h.edit().focused());
-    // The header's search button is the same toggle.
-    h.sh->header().search()->onClick();
+    h.key(K::Escape);
     pump();
-    CHECK(s->shown());
-    h.sh->header().search()->onClick();
-    CHECK_FALSE(s->visible());
+    CHECK(h.sh->unifiedSearch() == nullptr);
+    CHECK(h.edit().focused());
+    CHECK_STR(h.edit().text(), "draft");
 }
 
-TEST("search: Enter searches, the arrows pick a result, Enter opens it and closes; Esc fades out") {
+namespace {
+
+// Pumps until the panel's message search has answered (the debounce, then
+// the fake backend), for at most ~5 s. The debounce ticks with the frames,
+// which only a shown window gets.
+void settle(shell::UnifiedSearch *s) {
+    using Kind     = shell::UnifiedSearch::RowKind;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < end) {
+        bool searching = false;
+        for (const auto &r : s->rows())
+            searching = searching || (r.kind == Kind::Status && r.text == "Searching\xE2\x80\xA6");
+        if (!searching)
+            return;
+        app().pump(5);
+    }
+}
+
+} // namespace
+
+TEST("search: the arrows pick a message, Enter opens it and closes; nothing matches: the status") {
+    using Kind = shell::UnifiedSearch::RowKind;
     Harness       h;
     const ConvRef design = h.conv("C0DESIGN"), mira = h.conv("D0MIRA");
+    h.win->native().show();
     h.sh->open(mira);
     pump();
     h.chord(kCtrl, K::F);
-    shell::MessageSearch *s = h.sh->messageSearch();
-    REQUIRE(s->shown());
+    shell::UnifiedSearch *s = h.sh->unifiedSearch();
+    REQUIRE(s);
     s->field().setText("  proposal b ");
-    h.key(K::Enter);
-    CHECK(s->list()->visible());
-    // The key's pump may already have brought the results ("Searching…" is
-    // checked below, straight after a direct runSearch).
-    for (int i = 0; i < 1000 && s->statusText() == "Searching\xE2\x80\xA6"; ++i)
-        pump(5);
-    REQUIRE(!s->results().empty());
-    CHECK(s->results()[0].conv == design);
-    CHECK(s->selected() == -1);
-    h.key(K::Up); // from nothing selected, Up takes the last one
-    CHECK(s->selected() == int(s->results().size()) - 1);
-    h.key(K::Down); // clamped, not wrapping
-    CHECK(s->selected() == int(s->results().size()) - 1);
-    for (size_t i = 0; i < s->results().size(); ++i)
-        h.key(K::Up);
+    settle(s);
+    int first = -1;
+    for (size_t i = 0; i < s->rows().size() && first < 0; ++i)
+        if (s->rows()[i].kind == Kind::Message)
+            first = int(i);
+    REQUIRE(first >= 0);
     CHECK(s->selected() == 0);
+    h.key(K::Up); // wrapping, from the first to the last
+    CHECK(s->selected() == int(s->rows().size()) - 1);
+    h.key(K::Down);
+    CHECK(s->selected() == 0);
+    for (int i = 0; i < first; ++i)
+        h.key(K::Down);
+    REQUIRE(s->selected() == first);
     h.key(K::Enter);
+    pump();
     CHECK(h.sh->current() == design);
-    CHECK_FALSE(s->visible()); // opening another conversation hides it
+    CHECK(h.sh->unifiedSearch() == nullptr);
     // Nothing matches: the status line.
     h.chord(kCtrl, K::F);
-    REQUIRE(s->shown());
-    CHECK_STR(s->field().text(), "  proposal b "); // kept, and selected
-    CHECK(s->selected() == 0);                     // so is the pick: Enter would open it again
-    s->runSearch("no such words anywhere");
-    CHECK_STR(s->statusText(), "Searching\xE2\x80\xA6"); // until the backend answers
-    for (int i = 0; i < 1000 && s->statusText() == "Searching\xE2\x80\xA6"; ++i)
-        pump(5);
-    CHECK_STR(s->statusText(), "No results found.");
-    CHECK(s->results().empty());
+    s = h.sh->unifiedSearch();
+    REQUIRE(s);
+    s->field().setText("no such words anywhere");
+    settle(s);
+    REQUIRE(!s->rows().empty());
+    CHECK(s->rows().back().kind == Kind::Status);
+    CHECK_STR(s->rows().back().text, "No results found.");
     h.key(K::Escape);
-    CHECK_FALSE(s->shown()); // fading out
-    for (int i = 0; i < 1000 && s->visible(); ++i)
-        pump(5);
-    CHECK_FALSE(s->visible());
+    pump();
+    CHECK(h.sh->unifiedSearch() == nullptr);
     CHECK(h.edit().focused());
 }
 
-TEST("search: a user resolving later renames the rows in place; the pick stays") {
+TEST("search: users changing while results show keep the pick") {
     Harness h;
+    h.win->native().show();
     h.chord(kCtrl, K::F);
-    shell::MessageSearch *s = h.sh->messageSearch();
-    REQUIRE(s->shown());
-    s->runSearch("proposal b");
-    for (int i = 0; i < 1000 && s->statusText() == "Searching\xE2\x80\xA6"; ++i)
-        pump(5);
-    REQUIRE(!s->results().empty());
-    h.key(K::Up);
+    shell::UnifiedSearch *s = h.sh->unifiedSearch();
+    REQUIRE(s);
+    s->field().setText("proposal b");
+    settle(s);
+    REQUIRE(s->rows().size() > 1);
+    h.key(K::Down);
     const int sel = s->selected();
-    REQUIRE(sel >= 0);
+    REQUIRE(sel == 1);
     h.store.usersChanged();
-    h.store.usersChanged(); // a burst: one pass over the rows
+    h.store.usersChanged();
     pump();
     CHECK(s->selected() == sel);
-    CHECK(s->results().size() > 0);
 }
 
 TEST("search: a result's labels") {

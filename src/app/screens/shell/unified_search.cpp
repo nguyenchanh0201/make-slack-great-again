@@ -23,21 +23,7 @@ namespace {
 constexpr float  kListH       = 360; // the list's height
 constexpr size_t kGroupedHits = 3;   // messages in the grouped view
 
-// Copied from quick_switcher.cpp (it goes with QuickSwitcher): a name's fuzzy
-// score, group DMs half a match behind; none for an id we can't name yet.
-std::optional<double> scoreOf(const QuickSwitchName &n, const std::vector<uint32_t> &q) {
-    if (n.text.folded.empty())
-        return std::nullopt;
-    std::optional<double> s = fuzzyScore(q, n.text);
-    if (!n.alt.folded.empty())
-        if (const std::optional<double> a = fuzzyScore(q, n.alt); a && (!s || *a > *s))
-            s = a;
-    if (!s)
-        return std::nullopt;
-    return *s + (n.group ? -0.5 : 0.0);
-}
-
-// Copied from quick_switcher.cpp: a workspace tab's 40 px bubble in a slot
+// A workspace tab's 40 px bubble in a slot
 // with room for the selection ring; dimmed when it has nothing for the query.
 class TabBubble final : public Clickable {
 public:
@@ -226,7 +212,7 @@ public:
             break;
         }
         bool person = r.kind == Kind::Person;
-        if (conv) { // QuickSwitcher's look: a DM's photo, a group's initial, a channel's # or lock
+        if (conv) { // a DM's photo, a group's initial, a channel's # or lock
             const model::Conversation &cv = st.conversation(*conv);
             person                        = cv.isDirect();
             if (cv.kind == model::ConvKind::Dm)
@@ -269,7 +255,7 @@ UnifiedSearch::UnifiedSearch(
     _tab             = std::clamp(_tab, 0, int(_tabs.size()) - 1);
     const bool multi = _tabs.size() > 1;
     style().width(560).padding(10).spacing(8);
-    if (multi) { // QuickSwitcher's strip
+    if (multi) { // the workspaces' strip
         _strip = add<View>();
         _strip->style().row().spacing(6).items(Align::Center);
         for (size_t i = 0; i < _tabs.size(); ++i) {
@@ -364,7 +350,7 @@ void UnifiedSearch::applyQuery() {
     requery();
 }
 
-// QuickSwitcher::applyFilter's re-aim: the tab follows the best name match;
+// The re-aim: the tab follows the best name match;
 // ties keep the showing tab, and one picked by hand holds while it has some.
 void UnifiedSearch::aimTab(const std::string &query) {
     _dimmed.clear();
@@ -380,7 +366,7 @@ void UnifiedSearch::aimTab(const std::string &query) {
     for (size_t i = 0; i < _tabs.size(); ++i) {
         std::optional<double> s;
         for (const QuickSwitchName &n : names(_tabs[i]))
-            if (const std::optional<double> x = scoreOf(n, q); x && (!s || *x > *s))
+            if (const std::optional<double> x = quickSwitchScore(n, q); x && (!s || *x > *s))
                 s = x;
         scores.push_back(s);
         _dimmed.push_back(!s);
@@ -468,6 +454,11 @@ bool UnifiedSearch::tick(double nowMs) {
         rebuild(true);
     });
     return false;
+}
+
+void UnifiedSearch::willClose() {
+    ++_generation;
+    _debouncing = false;
 }
 
 void UnifiedSearch::rebuild(bool keepPick) {
