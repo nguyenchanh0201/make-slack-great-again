@@ -390,9 +390,9 @@ void SidebarFooter::refresh() {
                "\xE2\x86\x92 Presence.");
     else if (link == L::Active)
         tip = tr("Visible \xE2\x80\x94 MSGA keeps you active. Click to appear hidden.");
-    // Off or Idle: no activity is signalled, but a session workspace's live
-    // link stays connected, and Slack may count that as active.
-    else if (link == L::Off || link == L::Idle)
+    // Off or Idle: no activity is signalled, but the link stays connected
+    // for live events, and Slack may count that as active.
+    else if (_ctx.backend.holdsPresenceLink() && (link == L::Off || link == L::Idle))
         tip =
             tr("Visible \xE2\x80\x94 MSGA isn't signalling activity, but Slack may still "
                "show you active while MSGA runs. Click to appear hidden.");

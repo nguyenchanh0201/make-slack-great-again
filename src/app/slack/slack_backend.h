@@ -231,6 +231,7 @@ public:
     // (session tokens only: OAuth ones show full names).
     void                                     setNamesMode(NamesMode mode) override;
     PresenceLink                             presenceLink() const override;
+    bool                                     holdsPresenceLink() const override;
     void                                     noteUserActivity() override;
     void                                     setWindowVisible(bool visible) override;
     RtmPresence                             *presenceLinkForTest() const; // null: OAuth

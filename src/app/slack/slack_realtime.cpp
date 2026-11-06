@@ -666,6 +666,10 @@ model::Backend::PresenceLink SlackBackend::presenceLink() const {
     return _live->rtm ? _live->rtm->state() : PresenceLink::Off;
 }
 
+bool SlackBackend::holdsPresenceLink() const {
+    return _live->rtm != nullptr;
+}
+
 RtmPresence *SlackBackend::presenceLinkForTest() const {
     return _live->rtm.get();
 }

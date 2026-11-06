@@ -859,9 +859,11 @@ TEST("slack realtime: the presence link holds an RTM socket with the d cookie") 
     e.be->setPresenceMode(Mode::Native);
     CHECK(e.be->presenceLink() == Link::Off);
     CHECK(rtm->connected());
+    CHECK(e.be->holdsPresenceLink());
     // An OAuth workspace has none.
     Env o(false, false);
     CHECK(o.be->presenceLinkForTest() == nullptr);
+    CHECK_FALSE(o.be->holdsPresenceLink());
 }
 
 TEST("slack realtime: the presence link reconnects without pongs and idles while unused") {

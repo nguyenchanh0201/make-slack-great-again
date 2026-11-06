@@ -105,6 +105,7 @@ public:
     void         setPresenceMode(PresenceMode mode) override;
     void         setNamesMode(NamesMode mode) override;
     PresenceLink presenceLink() const override;
+    bool         holdsPresenceLink() const override;
     void         noteUserActivity() override;
     void         setWindowVisible(bool visible) override;
     void         setStatus(std::string emoji, std::string text, int64_t expiry, Done d) override;

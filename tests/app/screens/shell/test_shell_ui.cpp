@@ -151,6 +151,13 @@ struct Fake : fake::FakeBackend {
 
     // The presence link, as a Slack session workspace reports it.
     PresenceLink presenceLink() const override { return link; }
+    bool         holdsPresenceLink() const override { return holds; }
+    SelfPresence selfPresence() const override {
+        SelfPresence p = fake::FakeBackend::selfPresence();
+        p.active       = p.active || selfActive;
+        return p;
+    }
+    bool         holds = false, selfActive = false;
     void         setPresenceMode(PresenceMode m) override { mode = m; }
     void         noteUserActivity() override { ++activity; }
     PresenceLink link     = PresenceLink::Off;
@@ -392,6 +399,23 @@ TEST("sidebar footer: the presence tooltip says what the presence link is doing"
         tip(PresenceLink::Unavailable),
         "Visible \xE2\x80\x94 but you appear away while no official Slack app is connected. "
         "MSGA can't hold your presence on this workspace."
+    );
+    // Shown active: a workspace holding the link (session) says it may keep
+    // you active with presence Off or Idle; one without (OAuth) doesn't.
+    h.backend.selfActive        = true;
+    const std::string automatic = "Visible \xE2\x80\x94 using automatic presence. Click to "
+                                  "appear hidden.";
+    CHECK_STR(tip(PresenceLink::Off), automatic);
+    CHECK_STR(tip(PresenceLink::Idle), automatic);
+    h.backend.holds             = true;
+    const std::string mayActive = "Visible \xE2\x80\x94 MSGA isn't signalling activity, but "
+                                  "Slack may still show you active while MSGA runs. Click to "
+                                  "appear hidden.";
+    CHECK_STR(tip(PresenceLink::Off), mayActive);
+    CHECK_STR(tip(PresenceLink::Idle), mayActive);
+    CHECK_STR(
+        tip(PresenceLink::Active),
+        "Visible \xE2\x80\x94 MSGA keeps you active. Click to appear hidden."
     );
 }
 
