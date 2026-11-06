@@ -130,7 +130,8 @@ struct SlackBackend::Live {
 SlackBackend::Live::Live(SlackBackend &b) : b(b), s(b.store()) {
     speed = testSpeedup();
     // The presence link exists only for a session token (rtm.connect refuses
-    // granular OAuth ones); idle until a mode is set.
+    // granular OAuth ones). It is held in every mode: its events are this
+    // workspace's live delivery (the modes only gate tickles).
     if (b._creds.sessionAuth()) {
         rtm = std::make_unique<RtmPresence>(
             b._app,
@@ -151,6 +152,19 @@ SlackBackend::Live::Live(SlackBackend &b) : b(b), s(b.store()) {
                 this->b.refreshSelfPresence(nullptr);
             });
         };
+        // The workspace's own socket: every event is ours. A frame without a
+        // type (a reply ack: {"ok":true,"reply_to":…}) is no event.
+        rtm->onEvent = [this](const json::Value &ev) {
+            if (!this->b._authLost && !ev["type"].str().empty())
+                apply(ev, true);
+        };
+        // The first hello is the start (connect() loads everything); a later
+        // one follows a gap Slack won't replay.
+        rtm->onHello = [this](bool gap) {
+            if (gap)
+                onReconnected();
+        };
+        later(0, [this] { rtm->start(); }); // once the backend is fully built
     }
     // Proactive refresh: a periodic wall-clock check (a timer that long would
     // sleep through a suspend), retrying transient failures by itself. The
@@ -188,7 +202,8 @@ void SlackBackend::setRealtime(std::shared_ptr<SocketMode> socket) {
 }
 
 bool SlackBackend::hasRealtimePush() const {
-    return _live->socket != nullptr;
+    // The RTM link only while up: refused or reconnecting, polling stands in.
+    return _live->socket != nullptr || (_live->rtm && _live->rtm->connected());
 }
 
 void SlackBackend::Live::attach(std::shared_ptr<SocketMode> sock) {
@@ -216,15 +231,19 @@ void SlackBackend::realtimeTick() {
 }
 
 void SlackBackend::realtimeMissed() {
-    Live &l = *_live;
+    Live      &l   = *_live;
     // Throttled: a persistently sick socket would otherwise reconnect on
     // every poll, each one a conversations.list reload (the 429 storm).
-    if (!l.socket || !l.due(l.lastReestablish, kReestablishGapMs))
+    const bool rtm = l.rtm && l.rtm->connected();
+    if ((!l.socket && !rtm) || !l.due(l.lastReestablish, kReestablishGapMs))
         return;
     LOG_WARN(
         "slack", "%s: realtime missed messages — re-establishing socket", _creds.teamId.c_str()
     );
-    l.socket->reconnectNow();
+    if (l.socket)
+        l.socket->reconnectNow();
+    else
+        l.rtm->reconnectNow();
 }
 
 // The socket is the app's, shared by every workspace: an event is ours when

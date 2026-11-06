@@ -59,7 +59,9 @@ int count(std::string_view method) {
     return Log().count(method);
 }
 
+// rtm.connect refused: a polling session workspace (no live RTM link).
 const char *kWorkspace = R"({
+ "rtm.connect": {"ok": false, "error": "not_allowed_token_type"},
  "auth.test": {"ok": true, "user_id": "UME", "team_id": "T1", "team": "Lumen",
                "url": "https://lumen.slack.com/"},
  "users.list": {"ok": true, "members": [

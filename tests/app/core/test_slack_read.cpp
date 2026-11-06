@@ -62,7 +62,9 @@ struct Log {
 // The workspace every connect test starts from: two pages of users, two of
 // conversations (a channel, a muted channel, DMs incl. a Slack Connect peer
 // users.list never lists, a group DM known only by its mpdm- name).
+// rtm.connect refused: a polling session workspace (no live RTM link).
 const char *kWorkspace = R"({
+ "rtm.connect": {"ok": false, "error": "not_allowed_token_type"},
  "auth.test": {"ok": true, "user_id": "UME", "team_id": "T1", "team": "Lumen",
                "url": "https://lumen.slack.com/"},
  "users.list": {"ok": true, "members": [

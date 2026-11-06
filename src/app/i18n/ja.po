@@ -2201,16 +2201,16 @@ msgid "Show me as active while MSGA is running"
 msgstr "MSGAの実行中はアクティブと表示する"
 
 #: src/app/screens/settings/settings_pages.cpp
-msgid "Show me as active while I use MSGA (away after 30 minutes without input)"
-msgstr "MSGAを使用している間はアクティブと表示する（30分間入力がないと離席中）"
+msgid "Show me as active while I use MSGA (stops after 30 minutes without input)"
+msgstr "MSGAを使用している間はアクティブと表示する（30分間入力がないと停止）"
 
 #: src/app/screens/settings/settings_pages.cpp
 msgid "Leave my presence to the official Slack apps"
 msgstr "プレゼンスは公式Slackアプリに任せる"
 
 #: src/app/screens/settings/settings_pages.cpp
-msgid "Slack only shows you as active while a Slack app is connected. MSGA can hold that connection itself, so you no longer need the official app open to look online. The Hide button still makes you appear away. Works for workspaces added with a Slack session."
-msgstr "Slackは、Slackアプリが接続されている間だけあなたをアクティブと表示します。MSGAがその接続を自身で維持できるため、オンラインに見せるために公式アプリを開いておく必要はなくなります。非表示ボタンを押せば引き続き離席中と表示されます。Slackセッションで追加したワークスペースで動作します。"
+msgid "Slack only shows you as active while a Slack app is connected. MSGA can hold that connection itself, so you no longer need the official app open to look online. The Hide button still makes you appear away. Works for workspaces added with a Slack session; there MSGA stays connected for live messages whichever you pick, so Slack may show you active while MSGA runs."
+msgstr "Slackは、Slackアプリが接続されている間だけあなたをアクティブと表示します。MSGAがその接続を自身で維持できるため、オンラインに見せるために公式アプリを開いておく必要はなくなります。非表示ボタンを押せば引き続き離席中と表示されます。Slackセッションで追加したワークスペースで動作します。そこではどれを選んでもMSGAはリアルタイムのメッセージのために接続を維持するため、MSGAの実行中はSlackでアクティブと表示されることがあります。"
 
 #: src/app/screens/settings/settings_pages.cpp
 msgid "Slack connection"
@@ -3527,6 +3527,10 @@ msgid "Visible — MSGA keeps you active. Click to appear hidden."
 msgstr "表示中 — MSGAがアクティブ状態を維持しています。クリックすると非表示にします。"
 
 #: src/app/screens/shell/sidebar_footer.cpp
+msgid "Visible — MSGA isn't signalling activity, but Slack may still show you active while MSGA runs. Click to appear hidden."
+msgstr "表示中 — MSGAはアクティビティを送信していませんが、MSGAの実行中はSlackでアクティブと表示されることがあります。クリックすると非表示にします。"
+
+#: src/app/screens/shell/sidebar_footer.cpp
 msgid "Visible — using automatic presence. Click to appear hidden."
 msgstr "表示中 — 自動プレゼンスを使用しています。クリックすると非表示にします。"
 
@@ -4144,6 +4148,12 @@ msgstr "ダウンロードに失敗しました: %1"
 #: src/app/update/updater.cpp
 msgid "Downloaded update is corrupt (checksum mismatch)."
 msgstr "ダウンロードした更新ファイルが破損しています（チェックサム不一致）。"
+
+#~ msgid "Show me as active while I use MSGA (away after 30 minutes without input)"
+#~ msgstr "MSGAを使用している間はアクティブと表示する（30分間入力がないと離席中）"
+
+#~ msgid "Slack only shows you as active while a Slack app is connected. MSGA can hold that connection itself, so you no longer need the official app open to look online. The Hide button still makes you appear away. Works for workspaces added with a Slack session."
+#~ msgstr "Slackは、Slackアプリが接続されている間だけあなたをアクティブと表示します。MSGAがその接続を自身で維持できるため、オンラインに見せるために公式アプリを開いておく必要はなくなります。非表示ボタンを押せば引き続き離席中と表示されます。Slackセッションで追加したワークスペースで動作します。"
 
 #~ msgid "Search messages…"
 #~ msgstr "メッセージを検索…"

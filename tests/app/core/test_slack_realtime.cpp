@@ -855,14 +855,10 @@ TEST("slack realtime: the presence link holds an RTM socket with the d cookie") 
     CHECK_STR(std::string(log.get("rtm.connect")["auth"].str()), "Bearer xoxc-test");
     // Active at once: a tickle right after hello.
     REQUIRE(pumpUntil([&] { return Log().frame("ws:rtm", "tickle"); }));
-    // Native drops it.
+    // Native keeps the socket (live delivery): presence Off.
     e.be->setPresenceMode(Mode::Native);
     CHECK(e.be->presenceLink() == Link::Off);
-    CHECK_FALSE(rtm->connected());
-    // Once started (live delivery), Native keeps the socket: presence Off.
-    rtm->start();
-    REQUIRE(pumpUntil([&] { return rtm->connected(); }));
-    CHECK(e.be->presenceLink() == Link::Off);
+    CHECK(rtm->connected());
     // An OAuth workspace has none.
     Env o(false, false);
     CHECK(o.be->presenceLinkForTest() == nullptr);
@@ -886,10 +882,11 @@ TEST("slack realtime: the presence link reconnects without pongs and idles while
     REQUIRE(pumpUntil([&] { return count("rtm.connect") >= 2; }, 5000));
     ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active && rtm->connected(); }));
-    // WhileUsing: no input for idleMs drops it; input brings it back.
+    // WhileUsing: no input for idleMs idles it (the socket stays: live
+    // delivery); input makes it active again.
     e.be->setPresenceMode(Mode::WhileUsing);
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Idle; }, 5000));
-    CHECK_FALSE(rtm->connected());
+    CHECK(rtm->connected());
     e.be->noteUserActivity();
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active; }));
 }
@@ -977,12 +974,214 @@ TEST("rtm presence: event frames reach onEvent, hello reports gaps") {
 TEST("slack realtime: rtm.connect refusing the token makes the link unavailable") {
     if (!haveServer())
         return;
-    Env e(true, false);
-    set(R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})");
+    Env e(true, false, {}, R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})");
     e.be->setPresenceMode(Mode::WhileRunning);
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Unavailable; }));
     pumpFor(200);
     CHECK(count("rtm.connect") == 1); // given up, not retried into a rate limit
+}
+
+// A session workspace whose RTM link is up: live delivery.
+static bool rtmLive(Env &e) {
+    return pumpUntil([&] { return e.be->hasRealtimePush() && !rtmConn().empty(); }, 5000);
+}
+
+// A bare RTM frame on the newest RTM socket.
+static bool rtmPush(const std::string &frame) {
+    return push(frame, rtmConn());
+}
+
+TEST("live rtm: a message frame reaches the Store without history calls") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const int     history = count("conversations.history");
+    const ConvRef c       = e.conv("C1");
+    const Ts      ts      = model::parseTs("1800000000.000100");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"hi <@UME>","ts":"1800000000.000100"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    CHECK(e.store.conversation(c).mentions == 1);
+    CHECK(count("conversations.history") == history);
+}
+
+TEST("live rtm: edits, deletions and reactions apply") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c  = e.conv("C1");
+    const Ts      ts = model::parseTs("1800000000.000200");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"v1","ts":"1800000000.000200"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    REQUIRE(rtmPush(
+        R"({"type":"message","subtype":"message_changed","channel":"C1","message":{"type":"message","user":"UMIRA","text":"v2","ts":"1800000000.000200","edited":{"ts":"1"}}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->text == "v2"; }));
+    CHECK(e.store.findMessage(c, ts)->edited);
+    REQUIRE(rtmPush(
+        R"({"type":"reaction_added","user":"UMIRA","reaction":"tada","item":{"type":"message","channel":"C1","ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->reactions.size() == 1; }));
+    REQUIRE(rtmPush(
+        R"({"type":"reaction_removed","user":"UMIRA","reaction":"tada","item":{"type":"message","channel":"C1","ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->reactions.empty(); }));
+    REQUIRE(rtmPush(
+        R"({"type":"message","subtype":"message_deleted","channel":"C1","deleted_ts":"1800000000.000200","previous_message":{"ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return !e.store.findMessage(c, ts); }));
+}
+
+TEST("live rtm: a message in an unknown DM surfaces") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    set(R"({"conversations.info?channel=D9": {"ok": true, "channel": {"id": "D9", "is_im": true,
+        "user": "UMIRA", "latest": {"ts": "1800000000.000300"}}}})");
+    REQUIRE(e.conv("D9") == kNoConv);
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"D9","user":"UMIRA","text":"psst","ts":"1800000000.000300"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.conv("D9") != kNoConv; }));
+    REQUIRE(pumpUntil([&] {
+        return e.store.findMessage(e.conv("D9"), model::parseTs("1800000000.000300"));
+    }));
+}
+
+TEST("live rtm: event then poll does not duplicate") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c  = e.conv("C1");
+    const Ts      ts = model::parseTs("1800000000.000400");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"once","ts":"1800000000.000400"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "once", "ts": "1800000000.000400"}],
+        "has_more": false}})");
+    const int history = count("conversations.history");
+    e.be->setActiveConversation(c, 0);
+    REQUIRE(pumpUntil([&] { return count("conversations.history") >= history + 2; }, 5000));
+    pumpFor(100);
+    int n = 0;
+    for (const model::Message &m : e.store.conversation(c).messages)
+        n += m.ts == ts;
+    CHECK(n == 1);
+}
+
+TEST("live rtm: control frames are ignored") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c      = e.conv("C1");
+    const size_t  held   = e.store.conversation(c).messages.size();
+    const size_t  convs  = e.store.conversationCount();
+    const auto    mira   = e.store.findUser("UMIRA");
+    const bool    active = e.store.user(mira).active;
+    // A reply ack (no type, but a ts and text) must not become a message.
+    REQUIRE(rtmPush(R"({"ok":true,"reply_to":7,"ts":"1800000000.000500","text":"sent"})"));
+    REQUIRE(rtmPush(R"({"type":"reconnect_url","url":"wss://x"})"));
+    REQUIRE(rtmPush(R"({"type":"presence_change","user":"UOTHER","presence":"away"})"));
+    REQUIRE(rtmPush(R"({"type":"no_such_event","channel":"C1","ts":"1800000000.000600"})"));
+    REQUIRE(rtmPush("not json at all"));
+    REQUIRE(rtmPush("[1,2,3]"));
+    REQUIRE(rtmPush(R"({"type":"error","error":{"code":1,"msg":"x"}})")); // last: it drops the link
+    pumpFor(200);
+    CHECK(e.store.conversation(c).messages.size() == held);
+    CHECK(e.store.conversationCount() == convs);
+    CHECK(e.store.user(mira).active == active);
+    CHECK(e.store.findUser("UOTHER") == model::kNoUser);
+}
+
+TEST("live rtm: hasRealtimePush follows the link") {
+    if (!haveServer())
+        return;
+    Env                 e(true, false);
+    slack::RtmPresence *rtm = e.be->presenceLinkForTest();
+    REQUIRE(rtm != nullptr);
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 2'000; // stays down long enough to see
+    rtm->setTimingForTest(t);
+    CHECK_FALSE(e.be->hasRealtimePush());
+    REQUIRE(e.connect());
+    // Held in Native (the default mode) too: presence stays Off.
+    REQUIRE(pumpUntil([&] { return e.be->hasRealtimePush(); }));
+    CHECK(e.be->presenceLink() == Link::Off);
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return !e.be->hasRealtimePush(); }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+}
+
+TEST("live rtm: a refused rtm.connect is no push; polling continues") {
+    if (!haveServer())
+        return;
+    Env e(
+        true,
+        false,
+        {},
+        R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"},
+              "client.counts": {"ok": true, "channels": [], "ims": [], "mpims": []}})"
+    );
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") == 1; }));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    const int counts = count("client.counts");
+    REQUIRE(pumpUntil([&] { return count("client.counts") > counts; }, 3000));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("live rtm: a missed message re-establishes the link, throttled") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.reconnectMinMs = 20;
+    t.reconnectMaxMs = 100;
+    rtm->setTimingForTest(t);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c = e.conv("C1");
+    // Opened with it already there: loaded, not missed.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        "has_more": false}})");
+    e.be->setActiveConversation(c, 0);
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.000800")); }));
+    const int connects = count("rtm.connect");
+    // The open chat's poll finds what the socket never pushed: re-established.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        "has_more": false}})");
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.000900")); }));
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") == connects + 1 && rtm->connected(); }));
+    // A second miss inside kReestablishGapMs: no second reconnect.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "again", "ts": "1800000000.001000"},
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        "has_more": false}})");
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1800000000.001000")); }));
+    pumpFor(100);
+    CHECK(count("rtm.connect") == connects + 1);
 }
 
 TEST("slack realtime: a huddle_thread starts a live huddle, its edit ends it") {
