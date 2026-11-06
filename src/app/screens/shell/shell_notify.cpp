@@ -28,10 +28,10 @@ namespace {
 
 constexpr int    kNotifyResolveStep  = 150; // ms between tries to resolve names
 constexpr int    kNotifyResolveTries = 10;
-constexpr size_t kMaxBody            = 100;
+constexpr size_t kMaxBody            = 2000;
 constexpr int    kNotifyTimeoutMs    = 5000;
 
-// The body's cap: 97 characters and "…".
+// Keep a useful expanded preview; macOS folds the visible banner itself.
 std::string capped(std::string_view s) {
     return utf8::ellipsize(s, kMaxBody, kMaxBody - 3);
 }
@@ -126,8 +126,8 @@ std::string Shell::workspaceIconFor(const model::Store &st) const {
 }
 
 // The OS notification, where there is a notifier (Windows falls back to a
-// tray balloon by itself); 0 = none shown. Callers play the chime either way,
-// also for a tray balloon. We pick the id (persisted, never reused -- see
+// tray balloon by itself); 0 = none shown. macOS plays the attached sound;
+// other platforms play the chime separately. We pick the id (persisted, never reused -- see
 // nextNotifyId), not the backend: a backend only knows about this run.
 uint64_t Shell::post(const plat::Notification &n) {
     plat::App &pa = _ctx.app.platform();
@@ -139,20 +139,33 @@ uint64_t Shell::post(const plat::Notification &n) {
 
 void Shell::postNotification(plat::Notification n, std::vector<std::string> pics, Notified where) {
     n.timeoutMs    = kNotifyTimeoutMs;
-    // The chosen sound is ours to play; whether the OS plays its own is
-    // sounds.h's call.
-    n.silent       = sounds::kSilentNotifications;
+#ifdef __APPLE__
+    n.threadId = str::concat({where.key, "\x1F", where.convId});
+    n.subtitle = _ctx.store().workspaceName;
+    for (const Workspace &w : _workspaces)
+        if (w.key == where.key && !w.name.empty())
+            n.subtitle = w.name;
+#else
+    n.silent = sounds::kSilentNotifications;
+#endif
     where.postedAt = base::nowSecs();
     notificationImage(
         std::move(pics),
         [this, n = std::move(n), where = std::move(where)](plat::Image img) mutable {
             n.image = std::move(img);
+#ifdef __APPLE__
+            // Read the current choice after any avatar delay; the OS plays it only once.
+            n.silent = !_settings.notifySound;
+            n.soundName = sounds::notificationSound(_settings.soundId);
+#endif
             if (const uint64_t id = post(n)) {
                 _notified[id] = std::move(where);
                 saveNotifiedSoon();
             }
+#ifndef __APPLE__
             if (_settings.notifySound)
                 sounds::play(_ctx.app.platform(), _settings.soundId);
+#endif
         }
     );
 }

@@ -1728,8 +1728,8 @@ Attention workspaceAttention(const model::Store &st, model::NotifyLevel fallback
     Attention a;
     for (ConvRef c = 0; c < st.conversationCount(); ++c) {
         const auto &cv = st.conversation(c);
-        if (!cv.member || (cv.latest && tsSecs(cv.latest) < nowSecs - kMaxNotifyAgeSecs))
-            continue; // left or closed; or all of it older than the notification window
+        if (!cv.member)
+            continue; // unread activity persists until read, even when banners would be too old
         const model::NotifyLevel level = cv.effectiveNotify(fallback);
         if (level == model::NotifyLevel::Nothing)
             continue;
@@ -1739,7 +1739,7 @@ Attention workspaceAttention(const model::Store &st, model::NotifyLevel fallback
             a.important += int(cv.unread);
         else {
             a.important += int(cv.mentions);
-            a.unread = a.unread || (level == model::NotifyLevel::All && cv.unread > cv.mentions);
+            a.unread = a.unread || cv.unread > cv.mentions;
         }
     }
     return a;

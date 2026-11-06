@@ -454,7 +454,7 @@ public:
     std::unique_ptr<Tray> createTray() override;
     bool                  notificationsAvailable() const override;
     bool                  notify(uint64_t id, const Notification &n) override;
-    void                  setBadgeCount(int count) override;
+    void                  setBadgeCount(int count, bool unread = false) override;
 
     bool darkMode() const override;
     int  doubleClickMs() const override { return int(GetDoubleClickTime()); }

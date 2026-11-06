@@ -273,7 +273,7 @@ public:
     bool                  notificationsAvailable() const override;
     bool                  notify(uint64_t id, const Notification &n) override;
     bool                  launchedFromNotification() override;
-    void                  setBadgeCount(int count) override;
+    void                  setBadgeCount(int count, bool unread = false) override;
 
     bool darkMode() const override;
     int  doubleClickMs() const override;
@@ -308,6 +308,7 @@ public:
     // notificationInvoke stays false: no public API clicks a banner.
     bool       notificationProbe(uint64_t id, NotificationProbe *out) override;
     int        badgeCount() override;
+    bool       badgeUnread() override;
     // wantsAttention stays false: AppKit has no getter for a pending
     // requestUserAttention: (the Dock bounce is not observable).
     bool       fileDialogRespond(std::vector<std::string> paths) override;

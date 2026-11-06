@@ -83,7 +83,7 @@ public:
     std::unique_ptr<Tray> createTray() override { return services().createTray(); }
     bool notificationsAvailable() const override { return services().notificationsAvailable(); }
     bool notify(uint64_t id, const Notification &n) override { return services().notify(id, n); }
-    void setBadgeCount(int n) override { services().setBadgeCount(n); }
+    void setBadgeCount(int n, bool unread = false) override { services().setBadgeCount(n); }
     bool darkMode() const override { return services().darkMode().value_or(false); }
 
 #ifdef PLAT_TEST_HOOKS

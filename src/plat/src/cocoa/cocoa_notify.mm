@@ -9,9 +9,7 @@
 // arrives on its own queues and is posted to the loop thread.
 #include "cocoa/cocoa_internal.h"
 
-#ifdef PLAT_TEST_HOOKS
 #import <CommonCrypto/CommonDigest.h>
-#endif
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <UserNotifications/UserNotifications.h>
@@ -27,6 +25,54 @@ using plat::cocoa::nsString;
 namespace {
 
 using Alive = CocoaApp::Alive;
+
+// UN sounds must be in the bundle or ~/Library/Sounds, unlike NSSound's
+// system-wide search. Explicit directories keep filesystem tests out of HOME.
+NSString *resolvedNotificationSound(NSString *name, NSString *userSounds, NSArray<NSString *> *systemDirs) {
+    NSString *fallback = @"msga-notify.wav";
+    if (!name.length || ![name isEqualToString:name.lastPathComponent] ||
+        [name isEqualToString:@"."] || [name isEqualToString:@".."])
+        return fallback;
+    if ([name isEqualToString:fallback] || [NSBundle.mainBundle pathForResource:name ofType:nil])
+        return name;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *candidates = name.pathExtension.length
+        ? @[name] : @[[name stringByAppendingPathExtension:@"aiff"],
+                     [name stringByAppendingPathExtension:@"aif"],
+                     [name stringByAppendingPathExtension:@"wav"],
+                     [name stringByAppendingPathExtension:@"caf"]];
+    for (NSString *dir in [@[userSounds] arrayByAddingObjectsFromArray:systemDirs]) {
+        for (NSString *candidate in candidates) {
+            NSString *source = [dir stringByAppendingPathComponent:candidate];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:source error:nil];
+            if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular])
+                continue;
+            if ([dir isEqualToString:userSounds])
+                return candidate;
+            NSData *data = [NSData dataWithContentsOfFile:source];
+            if (!data.length || data.length > UINT32_MAX)
+                return fallback;
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(data.bytes, CC_LONG(data.length), digest);
+            NSMutableString *local = [NSMutableString stringWithString:@"msga-system-"];
+            for (unsigned char c : digest)
+                [local appendFormat:@"%02x", c];
+            [local appendFormat:@".%@", candidate.pathExtension];
+            NSString *target = [userSounds stringByAppendingPathComponent:local];
+            NSDictionary *existing = [fm attributesOfItemAtPath:target error:nil];
+            if (existing) {
+                // Do not overwrite unrelated user files or follow a planted symlink.
+                return [existing[NSFileType] isEqualToString:NSFileTypeRegular] &&
+                       [[NSData dataWithContentsOfFile:target] isEqualToData:data] ? local : fallback;
+            }
+            if (![fm createDirectoryAtPath:userSounds withIntermediateDirectories:YES attributes:nil error:nil] ||
+                ![fm copyItemAtPath:source toPath:target error:nil])
+                return fallback;
+            return local;
+        }
+    }
+    return fallback;
+}
 
 // Run fn on the loop thread if the app still exists.
 void toLoop(const std::shared_ptr<Alive> &alive, std::function<void(CocoaApp *)> fn) {
@@ -226,8 +272,18 @@ bool CocoaApp::notify(uint64_t id, const Notification &n) {
         UNMutableNotificationContent *content = [UNMutableNotificationContent new];
         content.title                         = nsString(n.title);
         content.body                          = nsString(n.body);
-        if (!n.silent)
-            content.sound = UNNotificationSound.defaultSound;
+        content.subtitle                      = nsString(n.subtitle);
+        content.threadIdentifier              = nsString(n.threadId);
+        if (!n.silent) {
+            if (n.soundName.empty())
+                content.sound = UNNotificationSound.defaultSound;
+            else {
+                NSString *userSounds = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Sounds"];
+                NSString *name = resolvedNotificationSound(nsString(n.soundName), userSounds,
+                    @[@"/Library/Sounds", @"/System/Library/Sounds"]);
+                content.sound = [UNNotificationSound soundNamed:name];
+            }
+        }
         // timeoutMs has no macOS equivalent: banners go away on the user's
         // schedule (System Settings: banners vs. alerts).
         bool newCategory           = false;
@@ -382,6 +438,8 @@ bool CocoaApp::notificationProbe(uint64_t id, NotificationProbe *out) {
         UNNotificationContent *c = found.request.content;
         out->title               = c.title.UTF8String;
         out->body                = c.body.UTF8String;
+        out->subtitle            = c.subtitle.UTF8String;
+        out->threadId            = c.threadIdentifier.UTF8String;
         out->imageSize           = {};
         if (NSURL *url = c.attachments.firstObject.URL) {
             // The center's own copy of the attachment. Reading it is the

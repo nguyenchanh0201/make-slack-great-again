@@ -253,7 +253,10 @@ public:
         notifications[id] = n;
         return true;
     }
-    void setBadgeCount(int n) override { badge = n; }
+    void setBadgeCount(int n, bool unread = false) override {
+        badge = n;
+        unreadBadge = n <= 0 && unread;
+    }
 
     // ── Round 3 ─────────────────────────────────────────────────────────────
     // Two fake monitors side by side, the second HiDPI.
@@ -505,6 +508,9 @@ public:
             return false;
         out->title     = it->second.title;
         out->body      = it->second.body;
+        out->subtitle  = it->second.subtitle;
+        out->threadId  = it->second.threadId;
+        out->soundName = it->second.soundName;
         out->imageSize = {it->second.image.width, it->second.image.height};
         out->silent    = it->second.silent;
         out->actionLabels.clear();
@@ -520,6 +526,7 @@ public:
     }
     size_t notificationCount() const override { return notifications.size(); }
     int    badgeCount() override { return badge; }
+    bool   badgeUnread() override { return unreadBadge; }
     bool   wantsAttention(Window &w, bool *out) override {
         *out = static_cast<HeadlessWindow &>(w).attention;
         return true;
@@ -536,6 +543,7 @@ public:
     std::vector<HeadlessTray *>      trays;
     std::map<uint64_t, Notification> notifications;
     int                              badge = 0;
+    bool                             unreadBadge = false;
 
 private:
     Event dropEvent(EventType t, Point p, bool withData) {

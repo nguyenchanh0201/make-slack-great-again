@@ -574,6 +574,8 @@ struct Notification {
     std::vector<NotificationAction> actions;        // buttons, where the OS renders them
     int                             timeoutMs = -1; // -1 = OS default
     bool                            silent    = false;
+    std::string                     soundName; // macOS resource name; empty = OS default if !silent
+    std::string                     subtitle, threadId; // native macOS context and grouping
 };
 
 // Who we are to the OS: notification sender, taskbar grouping, launcher
@@ -763,7 +765,8 @@ public:
     virtual bool launchedFromNotification() { return false; }
 
     // Unread count on the Dock icon / taskbar button / launcher entry; 0 clears.
-    virtual void setBadgeCount(int count) {}
+    // macOS: unread shows a bullet when count is zero; other backends may ignore it.
+    virtual void setBadgeCount(int count, bool unread = false) {}
 
     // ── Monitors ────────────────────────────────────────────────────────────
     virtual std::vector<Monitor> monitors() const { return {}; }

@@ -25,13 +25,15 @@ add_library(msga_app_core STATIC
     media/audio_player.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/sfx_notify.cpp
 )
-# The notification chime (sfx/notify.wav) compiled in as a byte array.
+# One WAV input for embedded playback and the native macOS notification resource.
+set(MSGA_NOTIFY_SOUND_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../sfx/notify.wav"
+    CACHE FILEPATH "Notification chime WAV (may be a locally imported sound)")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sfx_notify.cpp
-    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/../../sfx/notify.wav
+    COMMAND ${CMAKE_COMMAND} "-DIN=${MSGA_NOTIFY_SOUND_FILE}"
             -DOUT=${CMAKE_CURRENT_BINARY_DIR}/sfx_notify.cpp -DNAMESPACE=sounds::data
             -DNAME=kNotifyWav -P ${CMAKE_CURRENT_SOURCE_DIR}/../tools/embed.cmake
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../../sfx/notify.wav ${CMAKE_CURRENT_SOURCE_DIR}/../tools/embed.cmake
+    DEPENDS "${MSGA_NOTIFY_SOUND_FILE}" ${CMAKE_CURRENT_SOURCE_DIR}/../tools/embed.cmake
     VERBATIM)
 # Crash reports (crash/crash_handler.cpp) carry the version and build time.
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../version.cmake)

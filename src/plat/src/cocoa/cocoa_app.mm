@@ -565,13 +565,14 @@ bool CocoaApp::openUrl(std::string_view url) {
     }
 }
 
-void CocoaApp::setBadgeCount(int count) {
+void CocoaApp::setBadgeCount(int count, bool unread) {
     ensureLaunched(); // the Dock tile only exists once we are in the Dock
     // Plain AppKit, no permission needed (unlike UNUserNotificationCenter's
     // badge); the Dock hides it when the user turned "Badge app icon" off.
     // The tile outlives the process, so an app should clear it before it
     // quits or the count sticks to the Dock icon.
-    NSApp.dockTile.badgeLabel = count > 0 ? [NSString stringWithFormat:@"%d", count] : nil;
+    NSApp.dockTile.badgeLabel = count > 0 ? [NSString stringWithFormat:@"%d", count]
+                                         : unread ? @"•" : nil;
 }
 
 void CocoaApp::onThemeChanged() {
@@ -846,6 +847,10 @@ bool CocoaApp::injectPhasedScroll(Window &win, double dx, double dy, ScrollPhase
 int CocoaApp::badgeCount() {
     NSString *label = NSApp.dockTile.badgeLabel;
     return label.length ? int(label.integerValue) : 0;
+}
+
+bool CocoaApp::badgeUnread() {
+    return [NSApp.dockTile.badgeLabel isEqualToString:@"•"];
 }
 
 bool CocoaApp::readPixel(Window &win, int x, int y, uint32_t *argb) {

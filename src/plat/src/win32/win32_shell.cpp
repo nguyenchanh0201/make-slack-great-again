@@ -1138,7 +1138,7 @@ void Win32App::forceBalloonNotifications(bool on) {
 
 // ── badge ───────────────────────────────────────────────────────────────────
 
-void Win32App::setBadgeCount(int count) {
+void Win32App::setBadgeCount(int count, bool unread) {
     Shell &s = shell();
     count    = std::max(0, count);
     if (count == s.badge)

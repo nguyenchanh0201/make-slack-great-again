@@ -44,7 +44,7 @@ public:
     virtual bool notificationInvoke(uint64_t id, std::string_view action) { return false; }
     // What the notification server received for id, read back from its side.
     struct NotificationProbe {
-        std::string              title, body;
+        std::string              title, body, subtitle, threadId, soundName;
         Size                     imageSize;
         std::vector<std::string> actionLabels;
         bool                     silent = false; // headless only: Notification::silent
@@ -68,6 +68,7 @@ public:
 
     // Launcher/taskbar/Dock badge as the OS shows it; -1 if unreadable.
     virtual int  badgeCount() { return -1; }
+    virtual bool badgeUnread() { return false; }
     // Whether the window is currently flagged as wanting attention.
     virtual bool wantsAttention(Window &w, bool *out) { return false; }
 

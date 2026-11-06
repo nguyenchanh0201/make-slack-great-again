@@ -1005,11 +1005,11 @@ TEST("attention: the rail, tray and badge count unread DMs, mentions and chats")
     };
     const shell::Attention a = count(NotifyLevel::All);
     CHECK(a.important == 3 && a.unread);
-    // "Just mentions" by default: channels only count their mentions, no blue.
+    // Quiet channel notifications still leave an unread activity dot, like Slack.
     h.backend.markRead(mira, h.store.conversation(mira).latest);
     h.backend.markRead(eng, h.store.conversation(eng).latest);
     CHECK(count(NotifyLevel::All).unread);
-    CHECK_FALSE(count(NotifyLevel::Mentions).unread);
+    CHECK(count(NotifyLevel::Mentions).unread);
     // "Nothing" counts for nothing; neither does a channel I left.
     h.backend.setNotifyLevel(rel, NotifyLevel::Nothing);
     CHECK_FALSE(count(NotifyLevel::All).unread);
@@ -1017,8 +1017,8 @@ TEST("attention: the rail, tray and badge count unread DMs, mentions and chats")
     h.store.updateConversation(rel, [](model::Conversation &c) { c.member = false; });
     CHECK_FALSE(count(NotifyLevel::All).unread);
     h.store.updateConversation(rel, [](model::Conversation &c) { c.member = true; });
-    // Idle past the 30-day notification window.
-    CHECK_FALSE(shell::workspaceAttention(h.store, NotifyLevel::All, now + 40 * 86400).unread);
+    // Read state, not message age, controls the Dock's unread activity.
+    CHECK(shell::workspaceAttention(h.store, NotifyLevel::All, now + 40 * 86400).unread);
 }
 
 TEST("menus: a sidebar row's menu works from the keyboard") {
@@ -3111,6 +3111,15 @@ TEST("workspaces: each tile shows its own dot; the badge sums the unmuted ones")
     w.post(w.b, "C0GENERAL", "news");
     REQUIRE(until([&] { return w.sh->workspaceDot(kKeyB) == 1; }));
     CHECK(w.sh->workspaceDot(kKeyA) == 0);
+#ifdef __APPLE__
+    CHECK(app().platform().testHooks()->badgeUnread());
+    CHECK(app().platform().testHooks()->badgeCount() == 0);
+    w.b.markRead(bGeneral, w.b.conversation(bGeneral).latest);
+    REQUIRE(until([&] { return w.sh->workspaceDot(kKeyB) == 0; }));
+    CHECK(!app().platform().testHooks()->badgeUnread());
+    w.post(w.b, "C0GENERAL", "more news");
+    REQUIRE(until([&] { return app().platform().testHooks()->badgeUnread(); }));
+#endif
     // A mention: red, and it counts on the launcher badge.
     w.post(w.b, "C0GENERAL", "<@U0ALEX> look");
     REQUIRE(w.b.conversation(bGeneral).mentions == 1);
@@ -3900,11 +3909,11 @@ TEST("notifications: the titles and gates — level, mutes, replies to unloaded 
     REQUIRE(fresh());
     CHECK_STR(n.title, "Mira Okafor");
     CHECK_STR(n.body, "lunch?");
-    // Long text: 97 characters and "…".
+    // The native banner, not an artificial 100-character cap, folds previews.
     w.post(a, "D0MIRA", std::string(150, 'x').c_str());
     pump();
     REQUIRE(fresh());
-    CHECK_STR(n.body, std::string(97, 'x') + "\xE2\x80\xA6");
+    CHECK_STR(n.body, std::string(150, 'x'));
     // "Direct messages and mentions only": a plain channel post is quiet, a
     // mention and a DM are not.
     w.settings.notifyLevel = 1;
@@ -3966,6 +3975,53 @@ TEST("notifications: the titles and gates — level, mutes, replies to unloaded 
     CHECK(w.sh->threadOpen());
     (void)dm;
 }
+
+#ifdef __APPLE__
+TEST("notifications: native bubbles carry workspace, conversation grouping and one selected sound") {
+    TwoWorkspaces w;
+    plat::TestHooks::NotificationProbe n;
+    uint64_t last = lastNotification(nullptr);
+    w.post(w.a, "D0MIRA", "first");
+    REQUIRE(until([&] { return lastNotification(&n) > last; }));
+    CHECK_STR(n.subtitle, "Lumen Studio");
+    REQUIRE(!n.threadId.empty());
+    const std::string group = n.threadId;
+    CHECK(!n.silent);
+    CHECK_STR(n.soundName, "msga-notify.wav");
+
+    last = lastNotification(nullptr);
+    w.settings.soundId = "system:Glass";
+    w.post(w.a, "D0MIRA", "second");
+    REQUIRE(until([&] { return lastNotification(&n) > last; }));
+    CHECK_STR(n.threadId, group);
+    CHECK_STR(n.soundName, "Glass");
+
+    last = lastNotification(nullptr);
+    w.settings.notifySound = false;
+    w.post(w.b, "D0MIRA", "quiet in the other workspace");
+    REQUIRE(until([&] { return lastNotification(&n) > last; }));
+    CHECK(n.silent);
+    CHECK(n.threadId != group);
+    CHECK_STR(n.subtitle, "Second Co");
+}
+
+TEST("notifications: sound changes while an avatar decodes apply before delivery") {
+    TwoWorkspaces w;
+    auto &avatar = w.a.user(w.a.findUser("U0MIRA")).avatar;
+    const size_t slash = avatar.rfind('/');
+    REQUIRE(slash != std::string::npos);
+    avatar.insert(slash + 1, "./"); // an uncached key for the same real picture
+    const uint64_t before = app().platform().testHooks()->maxNotificationId();
+    w.post(w.a, "D0MIRA", "wait for the avatar");
+    REQUIRE(app().platform().testHooks()->maxNotificationId() == before);
+    w.settings.notifySound = false;
+    w.settings.soundId = "system:Glass";
+    plat::TestHooks::NotificationProbe n;
+    REQUIRE(until([&] { return lastNotification(&n) > before; }));
+    CHECK(n.silent);
+    CHECK_STR(n.soundName, "Glass");
+}
+#endif
 
 TEST("notifications: a sender's picture not decoded yet is waited for, not skipped") {
     TwoWorkspaces w;

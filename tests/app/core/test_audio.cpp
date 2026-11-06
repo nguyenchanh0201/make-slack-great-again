@@ -22,6 +22,15 @@
 using plat::audio::Error;
 using plat::audio::Failure;
 
+TEST("sounds: native notification names preserve system selections and default unknown ids") {
+    CHECK_STR(sounds::notificationSound("bundled:notify"), "msga-notify.wav");
+    CHECK_STR(sounds::notificationSound(""), "msga-notify.wav");
+    CHECK_STR(sounds::notificationSound("unknown:sound"), "msga-notify.wav");
+    CHECK_STR(sounds::notificationSound("system:"), "msga-notify.wav");
+    CHECK_STR(sounds::notificationSound("system:Glass"), "Glass");
+    CHECK_STR(sounds::notificationSound("system:Custom.aiff"), "Custom.aiff");
+}
+
 namespace {
 
 plat::App &app() {
