@@ -399,7 +399,8 @@ public:
         Off,         // Native, or a service without one
         Connecting,  // being (re)established
         Active,      // up: the service counts us as connected
-        Idle,        // WhileUsing dropped it; any input brings it back
+        Idle,        // WhileUsing, no input for a while: dropped, or (held for live
+                     // events) no longer tickled; any input brings it back
         Unavailable, // the service refused it for these credentials
     };
     // People's names (Settings → Appearance → Names, in its order): as the

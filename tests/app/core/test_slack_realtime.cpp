@@ -72,9 +72,30 @@ int count(std::string_view method) {
     return Log().count(method);
 }
 
-// A server frame on the newest open Socket Mode socket.
-bool push(const std::string &frame) {
-    std::string body = "{\"text\":";
+// The newest RTM socket's id (for push()).
+std::string rtmConn() {
+    std::string id;
+    const Log   log;
+    for (json::Value r : log.doc.root())
+        if (r["method"].str() == "ws-open" && r["form"]["conn"].str().starts_with("rtm-"))
+            id = std::string(r["form"]["conn"].str());
+    return id;
+}
+
+int tickles() {
+    int       n = 0;
+    const Log log;
+    for (json::Value r : log.doc.root())
+        n += r["method"].str() == "ws:rtm" &&
+             r["form"]["text"].str().find("tickle") != std::string_view::npos;
+    return n;
+}
+
+// A server frame on socket `conn` (default: the newest open Socket Mode one).
+bool push(const std::string &frame, const std::string &conn = {}) {
+    std::string body = "{\"conn\":";
+    json::escapeString(body, conn);
+    body += ",\"text\":";
     json::escapeString(body, frame);
     body += '}';
     json::Document d;
@@ -838,6 +859,10 @@ TEST("slack realtime: the presence link holds an RTM socket with the d cookie") 
     e.be->setPresenceMode(Mode::Native);
     CHECK(e.be->presenceLink() == Link::Off);
     CHECK_FALSE(rtm->connected());
+    // Once started (live delivery), Native keeps the socket: presence Off.
+    rtm->start();
+    REQUIRE(pumpUntil([&] { return rtm->connected(); }));
+    CHECK(e.be->presenceLink() == Link::Off);
     // An OAuth workspace has none.
     Env o(false, false);
     CHECK(o.be->presenceLinkForTest() == nullptr);
@@ -867,6 +892,86 @@ TEST("slack realtime: the presence link reconnects without pongs and idles while
     CHECK_FALSE(rtm->connected());
     e.be->noteUserActivity();
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active; }));
+}
+
+TEST("rtm presence: native holds the socket without tickles") {
+    if (!haveServer())
+        return;
+    Env                 e(true, false);
+    slack::RtmPresence *rtm = e.be->presenceLinkForTest();
+    REQUIRE(rtm != nullptr);
+    slack::RtmPresence::Timing t;
+    t.alwaysTickleMs = 50;
+    rtm->setTimingForTest(t);
+    bool hello   = false;
+    rtm->onHello = [&](bool) { hello = true; };
+    rtm->start();
+    REQUIRE(pumpUntil([&] { return rtm->connected() && hello; }));
+    CHECK(e.be->presenceLink() == Link::Off);
+    pumpFor(2 * t.alwaysTickleMs);
+    CHECK_FALSE(Log().frame("ws:rtm", "tickle"));
+    CHECK_STR(std::string(Log().get("ws-open")["cookie"].str()), "d=xoxd-test");
+    // A holding mode reuses the socket: active at once, no second rtm.connect.
+    e.be->setPresenceMode(Mode::WhileRunning);
+    CHECK(e.be->presenceLink() == Link::Active);
+    REQUIRE(pumpUntil([&] { return tickles() >= 2; })); // the at-once one + the clock
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("rtm presence: while-using idles without dropping the socket") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.idleMs = 300;
+    rtm->setTimingForTest(t);
+    rtm->start();
+    e.be->setPresenceMode(Mode::WhileUsing);
+    REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active; }));
+    REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Idle; }, 5000));
+    CHECK(rtm->connected());
+    const int n = tickles();
+    pumpFor(200);
+    CHECK(tickles() == n);
+    e.be->noteUserActivity();
+    CHECK(e.be->presenceLink() == Link::Active);
+    REQUIRE(pumpUntil([&] { return tickles() > n; }));
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("rtm presence: event frames reach onEvent, hello reports gaps") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 20;
+    t.reconnectMaxMs = 100;
+    rtm->setTimingForTest(t);
+    std::vector<bool>        gaps;
+    std::vector<std::string> events;
+    rtm->onHello = [&](bool afterGap) { gaps.push_back(afterGap); };
+    rtm->onEvent = [&](const json::Value &f) {
+        events.push_back(std::string(f["type"].str()) + ":" + std::string(f["channel"].str()));
+    };
+    rtm->start();
+    REQUIRE(pumpUntil([&] { return gaps.size() == 1; }));
+    CHECK_FALSE(gaps[0]);
+    REQUIRE(push(R"({"type":"message","channel":"C1","ts":"1.0","text":"x"})", rtmConn()));
+    REQUIRE(pumpUntil([&] { return !events.empty(); }));
+    CHECK_STR(events[0], "message:C1");
+    REQUIRE(push(R"({"type":"pong","reply_to":1})", rtmConn()));
+    pumpFor(100);
+    CHECK(events.size() == 1);
+    // A drop (pongs stop): the next hello says there was a gap.
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") >= 2; }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+    REQUIRE(pumpUntil([&] { return gaps.size() >= 2; }));
+    CHECK(gaps[1]);
+    CHECK(events.size() == 1);
 }
 
 TEST("slack realtime: rtm.connect refusing the token makes the link unavailable") {
