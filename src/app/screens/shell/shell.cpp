@@ -1395,15 +1395,17 @@ class SearchBar final : public Clickable {
 public:
     explicit SearchBar(float h) {
         style().row().flex(1).height(h).padding(10, 0).spacing(6).items(Align::Center);
-        add<IconView>(Icon::Search, 14, C::AccentText)->setHitTransparent(true);
-        _text = add<Label>("", Font::Control, C::AccentText);
+        add<IconView>(Icon::Search, 14, C::TitleBarControl)->setHitTransparent(true);
+        _text = add<Label>("", Font::Control, C::TitleBarControl);
         _text->setMaxLines(1);
         _text->setHitTransparent(true);
         _text->style().flex(1);
     }
     void setText(std::string t) { _text->setText(std::move(t)); }
-    void paint(gfx::Painter &p) override { // a light veil over the title bar, white text on it
-        p.fillRoundRect(bounds(), 6, gfx::withAlpha(0xffffffff, hovered() ? 0.3f : 0.22f));
+    void paint(gfx::Painter &p) override {
+        p.fillRoundRect(
+            bounds(), 6, gfx::withAlpha(color(C::TitleBarControl), hovered() ? 0.22f : 0.16f)
+        );
     }
 
 private:

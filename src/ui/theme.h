@@ -221,7 +221,7 @@ struct CustomPalette {
     Color important       = 0xffcd2553; // mention badge
     int   brightness      = 6;          // 0–10, 6 = the rail as designed
     bool  sidebarInverted = true;       // a dark rail over light content
-    bool  gradient        = true;       // kept for Slack round trips; drawn flat
+    bool  gradient        = true;       // blend primary and selection hues in navigation chrome
     // Pins a legacy Slack theme string names outright; 0 = derive: menu_bg / hover_item,
     // active_item_text, text_color, top_nav_bg, top_nav_text.
     Color itemHover = 0, itemSelText = 0, itemText = 0, titleBarBg = 0, titleBarText = 0;
@@ -232,6 +232,7 @@ struct PaletteColors {
     Color rail, sidebar, bubble, hover, pill, pillInk, text, textDim, scrollThumb;
     Color accent, accentHover, accentPressed, accentSubtle, online, badge;
     Color titleBar, titleBarControl; // the rail and the dim text unless pinned
+    Color gradientEnd; // selection hue lifted for a pale custom window gradient
 };
 
 // The picks; defaults are Purple (light) and Charcoal (dark). Call

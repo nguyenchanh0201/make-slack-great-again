@@ -429,7 +429,7 @@ PaletteColors paletteColors(Palette p, bool dark) {
     const bool    light  = lightness(s.rail) > 0.5f; // a pale rail takes dark ink
     PaletteColors c;
     c.rail    = s.rail;
-    c.sidebar = mix(s.rail, kWhite, dark ? 0.03f : 0.12f);
+    c.sidebar = mix(s.rail, kWhite, custom && light && !dark ? 0.90f : dark ? 0.03f : 0.12f);
     c.hover   = mix(s.rail, kWhite, dark ? 0.10f : 0.24f);
     c.bubble  = s.bubble;
     c.pill    = s.pill;
@@ -462,6 +462,7 @@ PaletteColors paletteColors(Palette p, bool dark) {
     }
     c.titleBar        = custom && g_custom.titleBarBg ? g_custom.titleBarBg : c.rail;
     c.titleBarControl = custom && g_custom.titleBarText ? g_custom.titleBarText : c.textDim;
+    c.gradientEnd     = custom && light ? withLightness(g_custom.highlight1, 0.78f) : s.rail;
     return c;
 }
 

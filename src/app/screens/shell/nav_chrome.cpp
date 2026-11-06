@@ -17,9 +17,16 @@ Color scaled(Color c, float f) {
     return (c & 0xff000000u) | ch(16) | ch(8) | ch(0);
 }
 
-// White-alpha overlays for the ghost buttons: not tokens, they read on any
-// nav tint.
-constexpr Color kGhostIcon = 0xffb4a5b4, kGhostIconHover = 0xfff5f0f5;
+Color mix(Color a, Color b, float amount) {
+    Color out = 0xff000000;
+    for (int shift : {0, 8, 16})
+        out |=
+            uint32_t(
+                float((a >> shift) & 255) * (1 - amount) + float((b >> shift) & 255) * amount + 0.5f
+            )
+            << shift;
+    return out;
+}
 
 } // namespace
 
@@ -29,6 +36,29 @@ void paintNavGradient(const View &v, gfx::Painter &p, C token) {
         palette(app() && app()->dark()) == Palette::Custom && !customPalette().gradient;
     if (flat || !v.window()) {
         p.fillRect(v.bounds(), base);
+        return;
+    }
+    const auto nav = paletteColors(palette(app() && app()->dark()), app() && app()->dark());
+    const int  r = int(nav.rail >> 16 & 255), g = int(nav.rail >> 8 & 255), b = int(nav.rail & 255);
+    if (palette(app() && app()->dark()) == Palette::Custom &&
+        std::max({r, g, b}) + std::min({r, g, b}) > 255) {
+        const float w      = std::max(1.f, v.window()->size().w),
+                    h      = std::max(1.f, v.window()->size().h);
+        const auto  origin = v.mapToWindow({0, 0});
+        Color       end    = nav.gradientEnd;
+        if (token == C::Sidebar)
+            end = mix(end, 0xffffffff, app()->dark() ? 0.03f : 0.90f);
+        // Screenshot-tuned approximation: opposite corners share a hue, in window coordinates.
+        uint32_t corners[] = {base, end, end, base};
+        p.save();
+        p.clipRect(v.bounds());
+        // Expand by half a window to align the two texel centres with the window's edges.
+        p.drawBitmap(
+            {corners, 2, 2, 2},
+            {-origin.x - w / 2, -origin.y - h / 2, w * 2, h * 2},
+            gfx::Sampling::Bilinear
+        );
+        p.restore();
         return;
     }
     // Local coordinates of the window's top and bottom edges.
@@ -60,12 +90,13 @@ void GhostButton::paint(gfx::Painter &p) {
 void GhostButton::paintChrome(gfx::Painter &p) {
     const bool  hov = hovered();
     const RectF r{0.75f, 0.75f, width() - 1.5f, height() - 1.5f};
-    p.fillRoundRect(r, 10, hov ? 0x37ffffffu : 0x16ffffffu);
-    p.strokeRoundRect(r, 10, 1.5f, hov ? 0xb4ffffffu : 0x5affffffu);
+    const Color ink = color(C::SidebarText);
+    p.fillRoundRect(r, 10, gfx::withAlpha(ink, hov ? 0.16f : 0.08f));
+    p.strokeRoundRect(r, 10, 1.5f, gfx::withAlpha(ink, hov ? 0.35f : 0.18f));
 }
 
 void GhostButton::paintGlyph(gfx::Painter &p, gfx::Icon icon) {
-    const Color ink = hovered() ? kGhostIconHover : kGhostIcon;
+    const Color ink = color(C::SidebarText);
     if (_plus) { // two opaque strokes: no alpha seam where they cross
         const float cx = width() / 2, cy = height() / 2, arm = 5;
         p.drawLine({cx - arm, cy}, {cx + arm, cy}, 2.5f, ink);
@@ -79,11 +110,7 @@ void GhostButton::paintGlyph(gfx::Painter &p, gfx::Icon icon) {
 void GhostButton::paintGlyphTurned(gfx::Painter &p, gfx::Icon icon, float degrees) {
     const float d = width() * 0.52f;
     gfx::drawIconRotated(
-        p,
-        icon,
-        {(width() - d) / 2, (height() - d) / 2, d, d},
-        hovered() ? kGhostIconHover : kGhostIcon,
-        degrees
+        p, icon, {(width() - d) / 2, (height() - d) / 2, d, d}, color(C::SidebarText), degrees
     );
 }
 
