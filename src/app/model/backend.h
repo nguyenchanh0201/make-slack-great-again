@@ -399,7 +399,8 @@ public:
         Off,         // Native, or a service without one
         Connecting,  // being (re)established
         Active,      // up: the service counts us as connected
-        Idle,        // WhileUsing dropped it; any input brings it back
+        Idle,        // WhileUsing, no input for a while: dropped, or (held for live
+                     // events) no longer tickled; any input brings it back
         Unavailable, // the service refused it for these credentials
     };
     // People's names (Settings → Appearance → Names, in its order): as the
@@ -410,6 +411,9 @@ public:
     virtual void         setPresenceMode(PresenceMode mode) { (void)mode; }
     virtual void         setNamesMode(NamesMode mode) { (void)mode; }
     virtual PresenceLink presenceLink() const { return PresenceLink::Off; }
+    // Whether this workspace has a presence link at all (one that, held for
+    // live events, may keep you active even with presence Off or Idle).
+    virtual bool         holdsPresenceLink() const { return false; }
     // Real input in the app (a click, a key, a scroll; the shell throttles
     // it to one call per 20 s): the WhileUsing idle clock and the service's
     // own activity signal.

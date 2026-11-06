@@ -4,15 +4,18 @@
 // messages, rate limits, auth errors, the Enterprise Grid fallback, and the
 // JSON mappers. Nothing here talks to the real Slack. Delays are compressed
 // (MSGA_SLACK_TEST_SPEEDUP) so the 5 s poll runs every 50 ms.
+#include "app/slack/rtm_presence.h"
 #include "app/slack/slack_backend.h"
 #include "app/slack/slack_json.h"
 #include "support/fake_slack_server.h"
 #include "base/json.h"
+#include "base/time.h"
 #include "support/test.h"
 
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 #ifndef _WIN32
 
@@ -62,6 +65,9 @@ struct Log {
 // The workspace every connect test starts from: two pages of users, two of
 // conversations (a channel, a muted channel, DMs incl. a Slack Connect peer
 // users.list never lists, a group DM known only by its mpdm- name).
+// Env refuses rtm.connect with it (kNoRtm): a polling session workspace
+// unless the test asks for the live RTM link.
+const char *kNoRtm     = R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})";
 const char *kWorkspace = R"({
  "auth.test": {"ok": true, "user_id": "UME", "team_id": "T1", "team": "Lumen",
                "url": "https://lumen.slack.com/"},
@@ -109,11 +115,14 @@ struct Env {
     std::unique_ptr<slack::SlackBackend> be;
     std::string                          lostAuth;
 
-    explicit Env(const char *table = kWorkspace, bool session = true) {
+    // live: kWorkspace with rtm.connect allowed (a session workspace's RTM link).
+    explicit Env(const char *table = kWorkspace, bool session = true, bool live = false) {
         base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", "100");
         ctl("POST", "/_ctl/reset");
         if (table)
             set(table);
+        if (table == kWorkspace && !live)
+            set(kNoRtm);
         slack::Credentials cr;
         cr.token       = session ? "xoxc-test" : "xoxp-test";
         cr.cookie      = session ? "xoxd-test" : "";
@@ -144,6 +153,17 @@ struct Env {
             ok     = o;
         });
         return pumpUntil([&] { return called; }) && ok;
+    }
+    // A slower clock (MSGA_SLACK_TEST_SPEEDUP=x): for tests timing the gap
+    // between requests, which 100x would squeeze under the scheduler's jitter.
+    void respeed(const char *x) {
+        be.reset();
+        base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", x);
+        slack::Credentials cr;
+        cr.token  = "xoxc-test";
+        cr.cookie = "xoxd-test";
+        cr.teamId = "T1";
+        be        = std::make_unique<slack::SlackBackend>(store, app(), client, cr);
     }
     ConvRef            conv(const char *id) const { return store.findConversation(id); }
     const model::User &user(const char *id) const { return store.user(store.findUser(id)); }
@@ -506,6 +526,133 @@ TEST("slack read: hidden, the open chat polls slowly, client.counts brings it fo
     ));
 }
 
+// ── Live (a session workspace's RTM link up): polling is a safety net ──────
+
+// The live Env's RTM link up, the open chat C1 settled into its cadence.
+static bool liveOpen(Env &e) {
+    if (!e.connect() || !pumpUntil([&] { return e.be->hasRealtimePush(); }, 5000))
+        return false;
+    const ConvRef c = e.conv("C1");
+    if (!e.history(c, 0))
+        return false;
+    e.be->setActiveConversation(c, 0);
+    fakeslack::pumpFor(200);
+    return true;
+}
+
+// conversations.history calls for anything but `open`.
+static int otherHistory(const Log &l, std::string_view open) {
+    int n = 0;
+    for (json::Value r : l.doc.root())
+        n += r["method"].str() == "conversations.history" && r["form"]["channel"].str() != open;
+    return n;
+}
+
+TEST("live poll: while live only the 60 s safety polls run") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, true, /*live=*/true);
+    REQUIRE(liveOpen(e));
+    const Log before;
+    fakeslack::pumpFor(1800); // 3 min
+    const Log l;
+    CHECK(e.be->hasRealtimePush());
+    // The Activity badge and Threads: once a minute (10 s / 20 s would be 18 / 9).
+    const int counts = l.count("client.counts") - before.count("client.counts");
+    CHECK(counts >= 2 && counts <= 4);
+    const int threads = l.count("subscriptions.thread.getView") +
+                        l.count("subscriptions.thread.getTimestamps") -
+                        before.count("subscriptions.thread.getView") -
+                        before.count("subscriptions.thread.getTimestamps");
+    CHECK(threads >= 2 && threads <= 4);
+    CHECK(l.count("users.conversations") == before.count("users.conversations"));
+    const int c1 = l.count("conversations.history", "channel", "C1") -
+                   before.count("conversations.history", "channel", "C1");
+    CHECK(c1 >= 2 && c1 <= 4);
+    CHECK(otherHistory(l, "C1") == otherHistory(before, "C1"));
+}
+
+TEST("live poll: drop falls back to fast polling, hello backfills once") {
+    if (!haveServer())
+        return;
+    Env                        e(kWorkspace, true, /*live=*/true);
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 2'000; // stays down long enough to see the fallback
+    e.be->presenceLinkForTest()->setTimingForTest(t);
+    REQUIRE(liveOpen(e));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return !e.be->hasRealtimePush(); }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+    // Down: the open chat at 5 s (50 ms here), client.counts back.
+    const Log down;
+    fakeslack::pumpFor(400);
+    const Log polled;
+    CHECK(
+        polled.count("conversations.history", "channel", "C1") -
+            down.count("conversations.history", "channel", "C1") >=
+        4
+    );
+    CHECK(polled.count("client.counts") > down.count("client.counts"));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    // Hidden for the rest of the gap: the open chat's poll slows to once a
+    // minute, so what follows the new socket's handshake is the backfill.
+    e.be->setWindowVisible(false);
+    // The hello after the gap: one roster reload, one backfill of the open
+    // chat's head page, then the slow cadence.
+    REQUIRE(pumpUntil([&] { return e.be->hasRealtimePush(); }, 5000));
+    fakeslack::pumpFor(300);
+    const Log back;
+    CHECK(
+        back.count("users.conversations", "cursor", "") -
+            polled.count("users.conversations", "cursor", "") ==
+        1
+    );
+    int  backfills = 0;
+    bool reopened  = false;
+    for (json::Value r : back.doc.root()) {
+        if (r["method"].str() == "ws-open") {
+            reopened  = true;
+            backfills = 0;
+        }
+        backfills += reopened && r["method"].str() == "conversations.history" &&
+                     r["form"]["channel"].str() == "C1";
+    }
+    CHECK(backfills == 1);
+    fakeslack::pumpFor(1300);
+    const Log l;
+    CHECK(l.count("client.counts") - back.count("client.counts") <= 3);
+    CHECK(
+        l.count("conversations.history", "channel", "C1") -
+            back.count("conversations.history", "channel", "C1") <=
+        3
+    );
+}
+
+TEST("live poll: a background find does not reconnect the socket") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, true, /*live=*/true);
+    // C1 open, D1 the background sweep's only other conversation.
+    set(R"({"users.conversations": {"ok": true, "channels": [
+              {"id": "C1", "name": "general", "is_channel": true, "is_member": true},
+              {"id": "D1", "is_im": true, "user": "UMIRA"}],
+            "response_metadata": {"next_cursor": ""}}})");
+    REQUIRE(liveOpen(e));
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history", "channel", "D1") > 0; }));
+    const int rtm = Log().count("rtm.connect");
+    set(R"({"conversations.history?channel=D1": {"ok": true, "has_more": false, "messages": [
+              {"type": "message", "ts": "1800000000.000100", "user": "UMIRA", "text": "psst"}]}})");
+    const ConvRef d = e.conv("D1");
+    // The next sweep (10 min: 6 s here) brings it.
+    REQUIRE(pumpUntil(
+        [&] { return e.store.findMessage(d, model::parseTs("1800000000.000100")) != nullptr; }, 9000
+    ));
+    fakeslack::pumpFor(200);
+    CHECK(Log().count("rtm.connect") == rtm);
+    CHECK(e.be->hasRealtimePush());
+}
+
 TEST("slack read: a channel read elsewhere loses its badge with the next client.counts") {
     if (!haveServer())
         return;
@@ -807,6 +954,183 @@ TEST("slack read: a rate-limited call waits out Retry-After and retries") {
     REQUIRE(e.history(c, 0));
     CHECK(e.store.conversation(c).messages.size() == 1);
     CHECK(Log().count("conversations.history") == 2);
+}
+
+TEST("slack read: identical throttled reads merge") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10"); // the 1 s cooldown is 100 ms: room to ask again inside it
+    const ConvRef c = e.addChannel("C1");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"},
+      {"ok": true, "has_more": false, "messages": [
+        {"type": "message", "ts": "1700000100.000000", "user": "UME", "text": "made it"}]}
+    ])");
+    int  calls = 0, oks = 0;
+    auto done = [&](bool ok, const std::string &) {
+        ++calls;
+        oks += ok;
+    };
+    e.be->loadHistory(c, 0, done);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // the 429 lands: C1's history cools down
+    for (int i = 0; i < 3; ++i)
+        e.be->loadHistory(c, 0, done);
+    REQUIRE(pumpUntil([&] { return calls == 4; }));
+    fakeslack::pumpFor(300);
+    CHECK(calls == 4); // each caller heard once
+    CHECK(oks == 4);   // the one answer
+    CHECK(Log().count("conversations.history", "channel", "C1") == 2);
+    CHECK(e.store.conversation(c).messages.size() == 1);
+}
+
+TEST("slack read: a cooldown releases queued reads one at a time") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10"); // 1 s apart is 100 ms here
+    const ConvRef c1 = e.addChannel("C1");
+    const ConvRef c2 = e.addChannel("C2");
+    const ConvRef c3 = e.addChannel("C3");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    std::vector<std::pair<ConvRef, int64_t>> answered; // conv, when its answer came
+    auto                                     load = [&](ConvRef c) {
+        e.be->loadHistory(c, 0, [&, c](bool, const std::string &) {
+            answered.emplace_back(c, base::monotonicMs());
+        });
+    };
+    load(c1);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20);
+    load(c2);
+    load(c3);
+    REQUIRE(pumpUntil([&] { return answered.size() == 3; }));
+    Log log;
+    REQUIRE(log.count("conversations.history") == 4);
+    CHECK_STR(log.get("conversations.history", 1)["form"]["channel"].str(), "C1");
+    CHECK_STR(log.get("conversations.history", 2)["form"]["channel"].str(), "C2");
+    CHECK_STR(log.get("conversations.history", 3)["form"]["channel"].str(), "C3");
+    CHECK(answered[0].first == c1 && answered[1].first == c2 && answered[2].first == c3);
+    // Not a burst: ~100 ms between them (some slack for the answers' own latency).
+    CHECK(answered[1].second - answered[0].second >= 70);
+    CHECK(answered[2].second - answered[1].second >= 70);
+}
+
+TEST("slack read: a user's read goes out first after a throttled retry") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10");
+    const ConvRef c5 = e.addChannel("C5");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    int  answered = 0;
+    auto poll     = [&](const char *id) { // a poll's read: Normal lane, not urgent
+        e.be->readCallForTest(
+            "conversations.history",
+            std::string("channel=") + id,
+            [&](const json::Document &, const std::string &) { ++answered; },
+            false
+        );
+    };
+    poll("C1");
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // C1's 429 lands: the method cools down
+    poll("C2");
+    poll("C3");
+    poll("C4");
+    e.be->loadHistory(c5, 0, [&](bool, const std::string &) { ++answered; });
+    REQUIRE(pumpUntil([&] { return answered == 5; }));
+    Log log;
+    REQUIRE(log.count("conversations.history") == 6);
+    // The 429, then: the throttled retry, the user's load, the polls in turn.
+    const char *order[] = {"C1", "C1", "C5", "C2", "C3", "C4"};
+    for (int i = 0; i < 6; ++i)
+        CHECK_STR(log.get("conversations.history", i)["form"]["channel"].str(), order[i]);
+}
+
+TEST("slack read: identical writes riding the read path are never merged") {
+    if (!haveServer())
+        return;
+    Env e(nullptr);
+    e.respeed("10");
+    const ConvRef c  = e.addChannel("C1");
+    const Ts      ts = model::parseTs("1700000100.000000");
+    script("chat.delete", R"([
+      {"__status": 429, "__headers": {"Retry-After": "1"}, "ok": false, "error": "ratelimited"}
+    ])");
+    // chat.delete rides the read path (retried like a read); two more of
+    // the same delete during its cooldown are two more requests, not one.
+    int  answered = 0;
+    auto del      = [&] {
+        e.be->deleteAgentReply(c, ts, [&](bool, const std::string &) { ++answered; });
+    };
+    del();
+    REQUIRE(pumpUntil([&] { return Log().count("chat.delete") == 1; }));
+    fakeslack::pumpFor(20);
+    del();
+    del();
+    REQUIRE(pumpUntil([&] { return answered == 3; }));
+    fakeslack::pumpFor(300);
+    CHECK(Log().count("chat.delete") == 4);
+}
+
+TEST("slack read: writes rate-limited together retry in their original order") {
+    if (!haveServer())
+        return;
+    // Both in flight before either 429 lands (__delay); both answer orders:
+    // W1's first, then W2's first. The cooldown (300 ms) outlasts both.
+    for (const bool w2First : {false, true}) {
+        Env e(nullptr);
+        e.respeed("10");
+        const ConvRef c = e.addChannel("C1");
+        script(
+            "chat.delete",
+            std::string(R"([{"__status": 429, "__headers": {"Retry-After": "3"}, "ok": false,
+                "error": "ratelimited", "__delay": )") +
+                (w2First ? "0.2" : "0.1") +
+                R"(}, {"__status": 429, "__headers": {"Retry-After": "3"}, "ok": false,
+                "error": "ratelimited", "__delay": )" +
+                (w2First ? "0" : "0.2") + "}]"
+        );
+        int  answered = 0;
+        auto del      = [&](const char *ts) {
+            e.be->deleteAgentReply(c, model::parseTs(ts), [&](bool, const std::string &) {
+                ++answered;
+            });
+        };
+        del("1700000100.000000"); // W1
+        REQUIRE(pumpUntil([&] { return Log().count("chat.delete") == 1; }));
+        del("1700000200.000000"); // W2, in flight together
+        REQUIRE(pumpUntil([&] { return answered == 2; }, 3000));
+        Log log;
+        REQUIRE(log.count("chat.delete") == 4);
+        CHECK_STR(log.get("chat.delete", 2)["form"]["ts"].str(), "1700000100.000000");
+        CHECK_STR(log.get("chat.delete", 3)["form"]["ts"].str(), "1700000200.000000");
+    }
+}
+
+TEST("slack read: writes are never merged") {
+    if (!haveServer())
+        return;
+    Env           e(nullptr);
+    const ConvRef c = e.addChannel("C1");
+    script("conversations.history", R"([
+      {"__status": 429, "__headers": {"Retry-After": "30"}, "ok": false, "error": "ratelimited"}
+    ])");
+    e.be->loadHistory(c, 0, nullptr);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.history") == 1; }));
+    fakeslack::pumpFor(20); // history cools down for 300 ms
+    int sent = 0;
+    for (int i = 0; i < 2; ++i)
+        e.be->send(c, "same words", 0, [&](bool ok, const std::string &) { sent += ok; });
+    REQUIRE(pumpUntil([&] { return sent == 2; }, 250)); // inside the cooldown
+    CHECK(Log().count("chat.postMessage") == 2);
+    CHECK(Log().count("conversations.history") == 1);
 }
 
 TEST("slack read: a gateway page or a lost connection is retried, not the end") {

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <list>
 #include <memory>
 #include <tuple>
 #include <unordered_set>
@@ -45,28 +46,35 @@ namespace {
 // the roster lacks (a new DM or channel) or drops a member one (left or
 // closed elsewhere), at most every kRosterSoonestGapMs, and otherwise every
 // kRosterFallbackGapMs for renames and topics.
-constexpr int64_t     kRosterReloadGapMs      = 60'000;
-constexpr int64_t     kRosterSoonestGapMs     = 10'000;
-constexpr int64_t     kRosterFallbackGapMs    = 15 * 60'000;
-constexpr int64_t     kDirectoryGapMs         = 10 * 60'000; // the channel browser's list
-constexpr int64_t     kCountsPollGapMs        = 10'000;
-constexpr int64_t     kThreadsPollGapMs       = 20'000;
-constexpr int64_t     kBackgroundPollGapMs    = 2 * 60'000;
-constexpr int64_t     kPresencePollGapMs      = 60'000;
-constexpr int64_t     kAwayProbeGapMs         = 5 * 60'000; // a posting "away" author, per user
+constexpr int64_t     kRosterReloadGapMs       = 60'000;
+constexpr int64_t     kRosterSoonestGapMs      = 10'000;
+constexpr int64_t     kRosterFallbackGapMs     = 15 * 60'000;
+constexpr int64_t     kDirectoryGapMs          = 10 * 60'000; // the channel browser's list
+constexpr int64_t     kCountsPollGapMs         = 10'000;
+constexpr int64_t     kThreadsPollGapMs        = 20'000;
+constexpr int64_t     kBackgroundPollGapMs     = 2 * 60'000;
+constexpr int64_t     kPresencePollGapMs       = 60'000;
+constexpr int64_t     kAwayProbeGapMs          = 5 * 60'000; // a posting "away" author, per user
 // The open chat of a session workspace while the window is hidden: client.counts
 // still brings it forward the moment it moves (applyActivity).
-constexpr int64_t     kHiddenOpenPollGapMs    = 60'000;
-constexpr int64_t     kSelfPresenceGapMs      = 60'000; // _selfPresenceTimer
-constexpr int64_t     kStarredGapMs           = 5 * 60'000;
-constexpr int64_t     kSavedGapMs             = 5 * 60'000; // kRemindersRefreshGapMs
-constexpr int64_t     kScheduledGapMs         = 5 * 60'000; // ones scheduled elsewhere
-constexpr int64_t     kScheduledSentSlackMs   = 15'000;     // re-list this long after one is due
-constexpr int64_t     kUsersRefreshGapMs      = 24 * 60 * 60'000;
-constexpr int64_t     kLookupRetryTransientMs = 10 * 60'000; // a failed users.info after a 5xx
-constexpr int64_t     kDmSweepGapSecs         = 12 * 3600;   // across restarts, via the cache
-constexpr int         kOffRosterProbeMs       = 90'000;
-constexpr int         kPacedMs                = 1200; // the _infoApi background lane
+constexpr int64_t     kHiddenOpenPollGapMs     = 60'000;
+constexpr int64_t     kSelfPresenceGapMs       = 60'000; // _selfPresenceTimer
+// A session workspace while its RTM link is up: events deliver, polls are a
+// safety net (the open chat's misses re-establish the socket). Equal to
+// kReestablishGapMs (slack_realtime.cpp): live misses re-establish at most once a minute.
+constexpr int64_t     kLiveOpenPollGapMs       = 60'000;
+constexpr int64_t     kLiveBackgroundPollGapMs = 10 * 60'000;
+constexpr int64_t     kMissGraceUs             = 10'000'000; // a poll racing the event
+constexpr int64_t     kStarredGapMs            = 5 * 60'000;
+constexpr int64_t     kSavedGapMs              = 5 * 60'000; // kRemindersRefreshGapMs
+constexpr int64_t     kScheduledGapMs          = 5 * 60'000; // ones scheduled elsewhere
+constexpr int64_t     kScheduledSentSlackMs    = 15'000;     // re-list this long after one is due
+constexpr int64_t     kUsersRefreshGapMs       = 24 * 60 * 60'000;
+constexpr int64_t     kLookupRetryTransientMs  = 10 * 60'000; // a failed users.info after a 5xx
+constexpr int64_t     kDmSweepGapSecs          = 12 * 3600;   // across restarts, via the cache
+constexpr int         kOffRosterProbeMs        = 90'000;
+constexpr int         kPacedMs                 = 1200; // the _infoApi background lane
+constexpr int         kReleaseMs   = 1000; // a throttled method's queue, after its cooldown
 constexpr int         kPresenceHot = 8, kPresenceRotate = 4;
 constexpr int         kMaxDiffPolls = 8, kCountsFailureLimit = 3;
 constexpr int         kMaxThreadInjects = 12, kMaxThreadBacklog = 3;
@@ -136,26 +144,40 @@ struct SlackBackend::Read {
     int64_t       speed = 1; // MSGA_SLACK_TEST_SPEEDUP: tests compress every delay
 
     // ── Plumbing ────────────────────────────────────────────────────────────
-    enum class Lane : uint8_t { Normal, Background };
+    // Urgent: a Normal read the user waits on, first out of a throttled
+    // method's queue. Write: a Normal-lane write safe to repeat (readCall's
+    // writes), never merged with another call.
+    enum class Lane : uint8_t { Normal, Background, Urgent, Write };
     struct Call {
         std::string method, form;
         ApiDone     done;
         int         attempt = 0;
         Lane        lane    = Lane::Normal;
         bool        quiet   = false; // a 429 waits without the banner
+        int         normals = 0;     // Normal-lane callers this call answers
+        uint64_t    seq     = 0;     // call order: 429 retries keep it
+        bool        retry   = false; // held after its own 429 (heads the queue)
     };
-    model::OneShotTimers                     timers{b._app}; // pending one-shots
-    plat::TimerId                            tickTimer = 0;
-    std::deque<Call>                         paced;
+    uint64_t                                                   nextSeq = 0;
+    model::OneShotTimers                                       timers{b._app}; // pending one-shots
+    plat::TimerId                                              tickTimer = 0;
+    std::deque<Call>                                           paced;
     // The queued (not yet issued) paced calls by method + form: a repeat
     // joins the queued one instead of costing another request. Deque
     // references survive push_back/pop_front of other elements.
-    std::unordered_map<std::string, Call *>  pacedByKey;
-    bool                                     pacedBusy     = false;
+    std::unordered_map<std::string, Call *>                    pacedByKey;
+    bool                                                       pacedBusy     = false;
     // Normal-lane calls not yet answered (in flight, backing off or waiting
     // out a 429): the paced lane holds while any is.
-    int                                      normalPending = 0;
-    std::unordered_map<std::string, int64_t> readyAt; // per-method 429 cooldown
+    int                                                        normalPending = 0;
+    std::unordered_map<std::string, int64_t>                   readyAt; // per-method 429 cooldown
+    // Calls of a throttled method waiting out its cooldown, released one per
+    // kReleaseMs so they don't trip the limit again together. A repeat of a
+    // held read (method + form) joins it, like pacedByKey. A method is here
+    // exactly while its release timer is pending. A list: urgent calls are
+    // inserted mid-queue and heldByKey's iterators must survive that.
+    std::unordered_map<std::string, std::list<Call>>           held;      // by method
+    std::unordered_map<std::string, std::list<Call>::iterator> heldByKey; // method + form
 
     int64_t now() const { return base::monotonicMs() * speed; }
     void    later(int64_t ms, std::function<void()> fn);
@@ -166,8 +188,12 @@ struct SlackBackend::Read {
         Lane        lane  = Lane::Normal,
         bool        quiet = false
     );
-    void issue(Call c);
-    void pumpPaced();
+    void        issue(Call c);
+    void        send(Call c);
+    static void join(Call &queued, Call c);
+    void        hold(Call c, bool front);
+    void        release(const std::string &method);
+    void        pumpPaced();
     struct Pager {
         std::string                              method, form, key;
         std::function<void(const json::Value &)> onPage;
@@ -443,7 +469,9 @@ void SlackBackend::Read::call(
     std::string method, std::string form, ApiDone done, Lane lane, bool quiet
 ) {
     Call c{std::move(method), std::move(form), std::move(done), 0, lane, quiet};
-    if (lane == Lane::Normal) {
+    c.normals = lane != Lane::Background;
+    c.seq     = ++nextSeq;
+    if (lane != Lane::Background) {
         ++normalPending;
         issue(std::move(c));
         return;
@@ -455,19 +483,7 @@ void SlackBackend::Read::call(
     if (const auto it = pacedByKey.find(key); it != pacedByKey.end()) {
         // The same call is already waiting (a presence round while the lane
         // is held): one request answers both callers.
-        Call &queued = *it->second;
-        if (c.done) {
-            if (!queued.done) {
-                queued.done = std::move(c.done);
-            } else {
-                queued.done = [a = std::move(queued.done), b = std::move(c.done)](
-                                  const json::Document &doc, const std::string &err
-                              ) {
-                    a(doc, err);
-                    b(doc, err);
-                };
-            }
-        }
+        join(*it->second, std::move(c));
         return;
     }
     paced.push_back(std::move(c));
@@ -492,12 +508,90 @@ void SlackBackend::Read::pumpPaced() {
 }
 
 void SlackBackend::Read::issue(Call c) {
-    // Slack throttles per method: only this method waits out Retry-After.
-    if (const auto it = readyAt.find(c.method); it != readyAt.end() && it->second > now()) {
-        const int64_t wait = it->second - now();
-        later(wait, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
+    // Slack throttles per method: only this method waits out Retry-After,
+    // and it stays queued behind the method's held calls until they're out.
+    const auto it = readyAt.find(c.method);
+    if ((it != readyAt.end() && it->second > now()) || held.contains(c.method)) {
+        hold(std::move(c), false);
         return;
     }
+    send(std::move(c));
+}
+
+void SlackBackend::Read::hold(Call c, bool front) {
+    std::string key   = str::concat({c.method, "\n", c.form});
+    const auto  dup   = c.lane == Lane::Write ? heldByKey.end() : heldByKey.find(key);
+    const bool  fresh = !held.contains(c.method);
+    if (fresh)
+        later(std::max<int64_t>(readyAt[c.method] - now(), 0), [this, m = c.method] {
+            release(m);
+        });
+    std::list<Call> &q    = held[c.method];
+    // Urgent: after the head (a throttled retry), the other retries and the
+    // urgent calls before it.
+    auto             spot = [&q] {
+        auto at = q.empty() ? q.end() : std::next(q.begin());
+        while (at != q.end() && (at->retry || at->lane == Lane::Urgent))
+            ++at;
+        return at;
+    };
+    // A 429 retry: back in call order among the queued (two in flight
+    // together come back in the order they were made, whatever their answers').
+    auto inOrder = [&q](uint64_t seq) {
+        return std::find_if(q.begin(), q.end(), [seq](const Call &x) { return x.seq > seq; });
+    };
+    if (dup != heldByKey.end()) {
+        const bool promote = c.lane == Lane::Urgent && dup->second->lane != Lane::Urgent;
+        join(*dup->second, std::move(c));
+        if (promote && dup->second != q.begin())
+            q.splice(spot(), q, dup->second);
+        return;
+    }
+    const bool urgent = c.lane == Lane::Urgent;
+    c.retry           = front;
+    const auto at     = q.insert(front ? inOrder(c.seq) : urgent ? spot() : q.end(), std::move(c));
+    if (at->lane != Lane::Write)
+        heldByKey.emplace(std::move(key), at);
+}
+
+void SlackBackend::Read::join(Call &queued, Call c) {
+    // One request answers both callers.
+    queued.normals += c.normals;
+    queued.quiet = queued.quiet && c.quiet;
+    if (c.lane == Lane::Urgent)
+        queued.lane = Lane::Urgent;
+    if (!c.done)
+        return;
+    if (!queued.done) {
+        queued.done = std::move(c.done);
+        return;
+    }
+    queued.done = [a = std::move(queued.done),
+                   b = std::move(c.done)](const json::Document &doc, const std::string &err) {
+        a(doc, err);
+        b(doc, err);
+    };
+}
+
+void SlackBackend::Read::release(const std::string &method) {
+    std::list<Call> &q = held[method];
+    // A second 429 meanwhile pushed the cooldown out: wait that out first.
+    if (const int64_t wait = readyAt[method] - now(); wait > 0) {
+        later(wait, [this, method] { release(method); });
+        return;
+    }
+    Call c = std::move(q.front());
+    q.pop_front();
+    if (c.lane != Lane::Write)
+        heldByKey.erase(str::concat({c.method, "\n", c.form}));
+    if (q.empty())
+        held.erase(method);
+    else
+        later(kReleaseMs, [this, method] { release(method); });
+    send(std::move(c));
+}
+
+void SlackBackend::Read::send(Call c) {
     const std::string method = c.method, form = c.form;
     const bool        quiet = c.quiet;
     b.issueApi(
@@ -510,7 +604,7 @@ void SlackBackend::Read::issue(Call c) {
                     "slack", "%s rate-limited, retrying in %llds", c.method.c_str(), (long long)secs
                 );
                 readyAt[c.method] = now() + secs * 1000;
-                later(secs * 1000, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
+                hold(std::move(c), true); // first out once the cooldown ends
                 return;
             }
             // Transient Slack errors and lost connections: a bounded backoff
@@ -524,11 +618,11 @@ void SlackBackend::Read::issue(Call c) {
                 later(delay, [this, c = std::move(c)]() mutable { issue(std::move(c)); });
                 return;
             }
-            const bool held  = c.lane == Lane::Normal && --normalPending == 0;
+            const bool holds = c.normals > 0 && (normalPending -= c.normals) == 0;
             const auto alive = b._alive; // `done` may end the backend
             if (c.done)
                 c.done(doc, err);
-            if (held && *alive)
+            if (holds && *alive)
                 pumpPaced();
         },
         false,
@@ -596,7 +690,7 @@ void SlackBackend::Read::pageFrom(std::shared_ptr<Pager> p, std::string cursor) 
             const std::string_view next = root["response_metadata"]["next_cursor"].str();
             if (next.empty())
                 p->onDone({});
-            else if (p->lane == Lane::Normal && !paced.empty())
+            else if (p->lane != Lane::Background && !paced.empty())
                 // A long listing lets the paced lane in between its pages
                 // (it only moves while no Normal call is outstanding).
                 later(0, [this, p, next = std::string(next)] { pageFrom(p, next); });
@@ -2155,7 +2249,8 @@ void SlackBackend::loadHistory(ConvRef conv, Ts before, Done done) {
                 });
             if (done)
                 done(true, {});
-        }
+        },
+        Read::Lane::Urgent
     );
 }
 
@@ -2249,7 +2344,8 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
             if (done)
                 done(true, {});
         },
-        kMaxThreadPages
+        kMaxThreadPages,
+        live ? Lane::Normal : Lane::Urgent // !live: the user opened it
     );
 }
 
@@ -2478,13 +2574,18 @@ void SlackBackend::Read::tick() {
         loadConversations([](const std::string &) {});
     }
     pruneThreadState();
-    // (0b) One request reports every conversation's activity.
-    if (!push && !countsDisabled && t - lastCounts >= kCountsPollGapMs) {
+    // A session workspace's RTM link up: events deliver, polls are a safety net.
+    const bool live = push && session;
+    // (0b) One request reports every conversation's activity. Live, still
+    // (slowly): the Activity badge and Threads lean on it. Not app keys'.
+    if ((!push || live) && !countsDisabled &&
+        t - lastCounts >= (live ? kLiveOpenPollGapMs : kCountsPollGapMs)) {
         lastCounts = t;
         pollUnreadCounts();
     }
     // (0c) Thread replies move no channel's `latest`: only the feed sees them.
-    if (!push && session && !threadsUnavailable && t - lastThreads >= kThreadsPollGapMs) {
+    if (session && !threadsUnavailable &&
+        t - lastThreads >= (live ? kLiveOpenPollGapMs : kThreadsPollGapMs)) {
         lastThreads = t;
         pollThreadReplies();
     }
@@ -2492,8 +2593,11 @@ void SlackBackend::Read::tick() {
     if (!watches.empty())
         pollWatches();
     // (2) The open chat; hidden, client.counts brings it forward when it
-    // moves (applyActivity).
-    const int64_t fgGap = !session ? 60'000 : visible ? 5'000 : kHiddenOpenPollGapMs;
+    // moves (applyActivity). Live, events bring it.
+    const int64_t fgGap = !session  ? 60'000
+                          : live    ? kLiveOpenPollGapMs
+                          : visible ? 5'000
+                                    : kHiddenOpenPollGapMs;
     if (openConv != kNoConv && t - lastFg >= fgGap) {
         lastFg = t;
         pollConversation(openConv, true);
@@ -2529,7 +2633,7 @@ void SlackBackend::Read::tick() {
         refreshSelfPresence();
     }
     // Background rotation over the other member conversations.
-    if (t - lastBg >= kBackgroundPollGapMs) {
+    if (t - lastBg >= (live ? kLiveBackgroundPollGapMs : kBackgroundPollGapMs)) {
         lastBg = t;
         if (const ConvRef bg = nextBackgroundTarget(); bg != kNoConv)
             pollConversation(bg, false);
@@ -2739,15 +2843,19 @@ void SlackBackend::Read::pollConversation(ConvRef c, bool foreground, Ts hint) {
             if (priming && !foreground)
                 return;
             resolveAuthors(page);
-            bool missed = false;
+            // A message under kMissGraceUs old may simply have beaten its
+            // event here: delivered, not missed.
+            const Ts recent = base::nowMicros() - kMissGraceUs;
+            bool     missed = false;
             if (!priming)
                 for (const model::Message &m : page)
                     if (m.ts > lastKnown)
-                        missed = inject(c, m.clone(), false) || missed;
+                        missed = (inject(c, m.clone(), false) && m.ts < recent) || missed;
             // The socket should have pushed that: it is compromised and
             // re-established (throttled). On a poll-only workspace
-            // this poll IS the delivery, not a miss.
-            if (missed && b.hasRealtimePush())
+            // this poll IS the delivery, not a miss. A session workspace's
+            // background sweep never reconnects (an rtm.connect storm).
+            if (missed && b.hasRealtimePush() && (foreground || !session))
                 b.realtimeMissed();
             if (!foreground || page.empty())
                 return;
@@ -3672,6 +3780,10 @@ void SlackBackend::readPages(
     _read->paginate(
         std::move(method), std::move(form), std::move(key), std::move(onPage), std::move(onDone)
     );
+}
+
+void SlackBackend::writeCall(std::string method, std::string form, ApiDone done) {
+    _read->call(std::move(method), std::move(form), std::move(done), Read::Lane::Write);
 }
 
 void SlackBackend::readCall(std::string method, std::string form, ApiDone done, bool background) {

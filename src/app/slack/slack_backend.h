@@ -231,6 +231,7 @@ public:
     // (session tokens only: OAuth ones show full names).
     void                                     setNamesMode(NamesMode mode) override;
     PresenceLink                             presenceLink() const override;
+    bool                                     holdsPresenceLink() const override;
     void                                     noteUserActivity() override;
     void                                     setWindowVisible(bool visible) override;
     RtmPresence                             *presenceLinkForTest() const; // null: OAuth
@@ -319,10 +320,13 @@ private:
     // on the paced lane (null: it failed; channel_not_found marks it dead).
     std::vector<std::string> directConversationIds() const;
     void sweepInfo(const std::string &id, std::function<void(model::Conversation *info)> done);
-    // A read call — or a write that is safe to repeat — with rate limits,
+    // A read call with rate limits,
     // lost connections and transient errors waited out; background: the
     // paced 1.2 s lane, which holds while a Normal call is outstanding.
     void readCall(std::string method, std::string form, ApiDone done, bool background = false);
+    // readCall for a write safe to repeat: the same retries, never merged
+    // with an identical call while its method is throttled (order matters).
+    void writeCall(std::string method, std::string form, ApiDone done);
     // Every page of a cursored read call (next_cursor), on the read lane:
     // onPage(root[key]) per page, then onDone("" or the first error).
     void readPages(

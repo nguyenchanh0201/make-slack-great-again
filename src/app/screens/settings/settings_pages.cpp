@@ -809,7 +809,7 @@ void SettingsDialog::buildSystem() {
         auto *rg = radios(
             g,
             {tr("Show me as active while MSGA is running"),
-             tr("Show me as active while I use MSGA (away after 30 minutes without "
+             tr("Show me as active while I use MSGA (stops after 30 minutes without "
                 "input)"),
              tr("Leave my presence to the official Slack apps")},
             &_s.presence
@@ -823,7 +823,8 @@ void SettingsDialog::buildSystem() {
             tr("Slack only shows you as active while a Slack app is connected. MSGA can hold "
                "that connection itself, so you no longer need the official app open to look "
                "online. The Hide button still makes you appear away. Works for workspaces "
-               "added with a Slack session.")
+               "added with a Slack session; there MSGA stays connected for live messages "
+               "whichever you pick, so Slack may show you active while MSGA runs.")
         );
     }
 

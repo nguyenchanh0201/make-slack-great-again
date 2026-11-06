@@ -72,9 +72,30 @@ int count(std::string_view method) {
     return Log().count(method);
 }
 
-// A server frame on the newest open Socket Mode socket.
-bool push(const std::string &frame) {
-    std::string body = "{\"text\":";
+// The newest RTM socket's id (for push()).
+std::string rtmConn() {
+    std::string id;
+    const Log   log;
+    for (json::Value r : log.doc.root())
+        if (r["method"].str() == "ws-open" && r["form"]["conn"].str().starts_with("rtm-"))
+            id = std::string(r["form"]["conn"].str());
+    return id;
+}
+
+int tickles() {
+    int       n = 0;
+    const Log log;
+    for (json::Value r : log.doc.root())
+        n += r["method"].str() == "ws:rtm" &&
+             r["form"]["text"].str().find("tickle") != std::string_view::npos;
+    return n;
+}
+
+// A server frame on socket `conn` (default: the newest open Socket Mode one).
+bool push(const std::string &frame, const std::string &conn = {}) {
+    std::string body = "{\"conn\":";
+    json::escapeString(body, conn);
+    body += ",\"text\":";
     json::escapeString(body, frame);
     body += '}';
     json::Document d;
@@ -673,17 +694,17 @@ TEST("slack realtime: a missed message re-establishes the socket") {
     e.be->setActiveConversation(e.conv("C1"), 0);
     // The open chat's poll finds what the socket never pushed.
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     REQUIRE(pumpUntil(
-        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1800000000.000800")); }, 5000
+        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1700000600.000800")); }, 5000
     ));
     set(R"({"conversations.history": {"ok": true, "messages": [
-        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1800000000.000900"},
-        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1800000000.000800"}],
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
         "has_more": false}})");
     REQUIRE(pumpUntil(
-        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1800000000.000900")); }, 5000
+        [&] { return e.store.findMessage(e.conv("C1"), model::parseTs("1700000600.000900")); }, 5000
     ));
     REQUIRE(pumpUntil([&] { return count("apps.connections.open") == 2; }));
     REQUIRE(pumpUntil([&] { return e.socket->connected() && e.socket->socketsForTest() == 1; }));
@@ -834,13 +855,15 @@ TEST("slack realtime: the presence link holds an RTM socket with the d cookie") 
     CHECK_STR(std::string(log.get("rtm.connect")["auth"].str()), "Bearer xoxc-test");
     // Active at once: a tickle right after hello.
     REQUIRE(pumpUntil([&] { return Log().frame("ws:rtm", "tickle"); }));
-    // Native drops it.
+    // Native keeps the socket (live delivery): presence Off.
     e.be->setPresenceMode(Mode::Native);
     CHECK(e.be->presenceLink() == Link::Off);
-    CHECK_FALSE(rtm->connected());
+    CHECK(rtm->connected());
+    CHECK(e.be->holdsPresenceLink());
     // An OAuth workspace has none.
     Env o(false, false);
     CHECK(o.be->presenceLinkForTest() == nullptr);
+    CHECK_FALSE(o.be->holdsPresenceLink());
 }
 
 TEST("slack realtime: the presence link reconnects without pongs and idles while unused") {
@@ -861,23 +884,403 @@ TEST("slack realtime: the presence link reconnects without pongs and idles while
     REQUIRE(pumpUntil([&] { return count("rtm.connect") >= 2; }, 5000));
     ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active && rtm->connected(); }));
-    // WhileUsing: no input for idleMs drops it; input brings it back.
+    // WhileUsing: no input for idleMs idles it (the socket stays: live
+    // delivery); input makes it active again.
     e.be->setPresenceMode(Mode::WhileUsing);
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Idle; }, 5000));
-    CHECK_FALSE(rtm->connected());
+    CHECK(rtm->connected());
     e.be->noteUserActivity();
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active; }));
+}
+
+TEST("rtm presence: native holds the socket without tickles") {
+    if (!haveServer())
+        return;
+    Env                 e(true, false);
+    slack::RtmPresence *rtm = e.be->presenceLinkForTest();
+    REQUIRE(rtm != nullptr);
+    slack::RtmPresence::Timing t;
+    t.alwaysTickleMs = 50;
+    rtm->setTimingForTest(t);
+    bool hello   = false;
+    rtm->onHello = [&](bool) { hello = true; };
+    rtm->start();
+    REQUIRE(pumpUntil([&] { return rtm->connected() && hello; }));
+    CHECK(e.be->presenceLink() == Link::Off);
+    pumpFor(2 * t.alwaysTickleMs);
+    CHECK_FALSE(Log().frame("ws:rtm", "tickle"));
+    CHECK_STR(std::string(Log().get("ws-open")["cookie"].str()), "d=xoxd-test");
+    // A holding mode reuses the socket: active at once, no second rtm.connect.
+    e.be->setPresenceMode(Mode::WhileRunning);
+    CHECK(e.be->presenceLink() == Link::Active);
+    REQUIRE(pumpUntil([&] { return tickles() >= 2; })); // the at-once one + the clock
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("rtm presence: while-using idles without dropping the socket") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.idleMs = 300;
+    rtm->setTimingForTest(t);
+    rtm->start();
+    e.be->setPresenceMode(Mode::WhileUsing);
+    REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Active; }));
+    REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Idle; }, 5000));
+    CHECK(rtm->connected());
+    const int n = tickles();
+    pumpFor(200);
+    CHECK(tickles() == n);
+    e.be->noteUserActivity();
+    CHECK(e.be->presenceLink() == Link::Active);
+    REQUIRE(pumpUntil([&] { return tickles() > n; }));
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("rtm presence: event frames reach onEvent, hello reports gaps") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 20;
+    t.reconnectMaxMs = 100;
+    rtm->setTimingForTest(t);
+    std::vector<bool>        gaps;
+    std::vector<std::string> events;
+    rtm->onHello = [&](bool afterGap) { gaps.push_back(afterGap); };
+    rtm->onEvent = [&](const json::Value &f) {
+        events.push_back(std::string(f["type"].str()) + ":" + std::string(f["channel"].str()));
+    };
+    rtm->start();
+    REQUIRE(pumpUntil([&] { return gaps.size() == 1; }));
+    CHECK_FALSE(gaps[0]);
+    REQUIRE(push(R"({"type":"message","channel":"C1","ts":"1.0","text":"x"})", rtmConn()));
+    REQUIRE(pumpUntil([&] { return !events.empty(); }));
+    CHECK_STR(events[0], "message:C1");
+    REQUIRE(push(R"({"type":"pong","reply_to":1})", rtmConn()));
+    pumpFor(100);
+    CHECK(events.size() == 1);
+    // A drop (pongs stop): the next hello says there was a gap.
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") >= 2; }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+    REQUIRE(pumpUntil([&] { return gaps.size() >= 2; }));
+    CHECK(gaps[1]);
+    CHECK(events.size() == 1);
 }
 
 TEST("slack realtime: rtm.connect refusing the token makes the link unavailable") {
     if (!haveServer())
         return;
-    Env e(true, false);
-    set(R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})");
+    Env e(true, false, {}, R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"}})");
     e.be->setPresenceMode(Mode::WhileRunning);
     REQUIRE(pumpUntil([&] { return e.be->presenceLink() == Link::Unavailable; }));
     pumpFor(200);
     CHECK(count("rtm.connect") == 1); // given up, not retried into a rate limit
+}
+
+// A session workspace whose RTM link is up: live delivery.
+static bool rtmLive(Env &e) {
+    return pumpUntil([&] { return e.be->hasRealtimePush() && !rtmConn().empty(); }, 5000);
+}
+
+// A bare RTM frame on the newest RTM socket.
+static bool rtmPush(const std::string &frame) {
+    return push(frame, rtmConn());
+}
+
+TEST("live rtm: a message frame reaches the Store without history calls") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const int     history = count("conversations.history");
+    const ConvRef c       = e.conv("C1");
+    const Ts      ts      = model::parseTs("1800000000.000100");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"hi <@UME>","ts":"1800000000.000100"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    CHECK(e.store.conversation(c).mentions == 1);
+    CHECK(count("conversations.history") == history);
+}
+
+TEST("live rtm: edits, deletions and reactions apply") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c  = e.conv("C1");
+    const Ts      ts = model::parseTs("1800000000.000200");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"v1","ts":"1800000000.000200"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    REQUIRE(rtmPush(
+        R"({"type":"message","subtype":"message_changed","channel":"C1","message":{"type":"message","user":"UMIRA","text":"v2","ts":"1800000000.000200","edited":{"ts":"1"}}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->text == "v2"; }));
+    CHECK(e.store.findMessage(c, ts)->edited);
+    REQUIRE(rtmPush(
+        R"({"type":"reaction_added","user":"UMIRA","reaction":"tada","item":{"type":"message","channel":"C1","ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->reactions.size() == 1; }));
+    REQUIRE(rtmPush(
+        R"({"type":"reaction_removed","user":"UMIRA","reaction":"tada","item":{"type":"message","channel":"C1","ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts)->reactions.empty(); }));
+    REQUIRE(rtmPush(
+        R"({"type":"message","subtype":"message_deleted","channel":"C1","deleted_ts":"1800000000.000200","previous_message":{"ts":"1800000000.000200"}})"
+    ));
+    REQUIRE(pumpUntil([&] { return !e.store.findMessage(c, ts); }));
+}
+
+TEST("live rtm: a message in an unknown DM surfaces") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    set(R"({"conversations.info?channel=D9": {"ok": true, "channel": {"id": "D9", "is_im": true,
+        "user": "UMIRA", "latest": {"ts": "1800000000.000300"}}}})");
+    REQUIRE(e.conv("D9") == kNoConv);
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"D9","user":"UMIRA","text":"psst","ts":"1800000000.000300"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.conv("D9") != kNoConv; }));
+    REQUIRE(pumpUntil([&] {
+        return e.store.findMessage(e.conv("D9"), model::parseTs("1800000000.000300"));
+    }));
+}
+
+TEST("live rtm: event then poll does not duplicate") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c  = e.conv("C1");
+    const Ts      ts = model::parseTs("1800000000.000400");
+    REQUIRE(rtmPush(
+        R"({"type":"message","channel":"C1","user":"UMIRA","text":"once","ts":"1800000000.000400"})"
+    ));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, ts); }));
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "once", "ts": "1800000000.000400"}],
+        "has_more": false}})");
+    const int history = count("conversations.history");
+    e.be->setActiveConversation(c, 0);
+    REQUIRE(pumpUntil([&] { return count("conversations.history") >= history + 2; }, 5000));
+    pumpFor(100);
+    int n = 0;
+    for (const model::Message &m : e.store.conversation(c).messages)
+        n += m.ts == ts;
+    CHECK(n == 1);
+}
+
+TEST("live rtm: control frames are ignored") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c      = e.conv("C1");
+    const size_t  held   = e.store.conversation(c).messages.size();
+    const size_t  convs  = e.store.conversationCount();
+    const auto    mira   = e.store.findUser("UMIRA");
+    const bool    active = e.store.user(mira).active;
+    // A reply ack (no type, but a ts and text) must not become a message.
+    REQUIRE(rtmPush(R"({"ok":true,"reply_to":7,"ts":"1800000000.000500","text":"sent"})"));
+    REQUIRE(rtmPush(R"({"type":"reconnect_url","url":"wss://x"})"));
+    REQUIRE(rtmPush(R"({"type":"presence_change","user":"UOTHER","presence":"away"})"));
+    REQUIRE(rtmPush(R"({"type":"no_such_event","channel":"C1","ts":"1800000000.000600"})"));
+    REQUIRE(rtmPush("not json at all"));
+    REQUIRE(rtmPush("[1,2,3]"));
+    REQUIRE(rtmPush(R"({"type":"error","error":{"code":1,"msg":"x"}})")); // last: it drops the link
+    pumpFor(200);
+    CHECK(e.store.conversation(c).messages.size() == held);
+    CHECK(e.store.conversationCount() == convs);
+    CHECK(e.store.user(mira).active == active);
+    CHECK(e.store.findUser("UOTHER") == model::kNoUser);
+}
+
+TEST("live rtm: hasRealtimePush follows the link") {
+    if (!haveServer())
+        return;
+    Env                 e(true, false);
+    slack::RtmPresence *rtm = e.be->presenceLinkForTest();
+    REQUIRE(rtm != nullptr);
+    slack::RtmPresence::Timing t;
+    t.pingMs         = 30;
+    t.reconnectMinMs = 2'000; // stays down long enough to see
+    rtm->setTimingForTest(t);
+    CHECK_FALSE(e.be->hasRealtimePush());
+    REQUIRE(e.connect());
+    // Held in Native (the default mode) too: presence stays Off.
+    REQUIRE(pumpUntil([&] { return e.be->hasRealtimePush(); }));
+    CHECK(e.be->presenceLink() == Link::Off);
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": true})");
+    REQUIRE(pumpUntil([&] { return !e.be->hasRealtimePush(); }, 5000));
+    ctl("POST", "/_ctl/ws/opt", R"({"rtm_nopong": false})");
+}
+
+TEST("live rtm: a refused rtm.connect is no push; polling continues") {
+    if (!haveServer())
+        return;
+    Env e(
+        true,
+        false,
+        {},
+        R"({"rtm.connect": {"ok": false, "error": "not_allowed_token_type"},
+              "client.counts": {"ok": true, "channels": [], "ims": [], "mpims": []}})"
+    );
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") == 1; }));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    const int counts = count("client.counts");
+    REQUIRE(pumpUntil([&] { return count("client.counts") > counts; }, 3000));
+    CHECK_FALSE(e.be->hasRealtimePush());
+    CHECK(count("rtm.connect") == 1);
+}
+
+TEST("live rtm: a missed message re-establishes the link, throttled") {
+    if (!haveServer())
+        return;
+    Env                        e(true, false);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.reconnectMinMs = 20;
+    t.reconnectMaxMs = 100;
+    rtm->setTimingForTest(t);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    const ConvRef c = e.conv("C1");
+    // Opened with it already there: loaded, not missed.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+        "has_more": false}})");
+    e.be->setActiveConversation(c, 0);
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.000800")); }));
+    const int connects = count("rtm.connect");
+    // The open chat's poll finds what the socket never pushed: re-established.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+        "has_more": false}})");
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.000900")); }));
+    REQUIRE(pumpUntil([&] { return count("rtm.connect") == connects + 1 && rtm->connected(); }));
+    // A second miss inside kReestablishGapMs (the live safety poll is that
+    // slow: showing the window again polls at once): no second reconnect.
+    set(R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "again", "ts": "1700000600.001000"},
+        {"type": "message", "user": "UMIRA", "text": "missed", "ts": "1700000600.000900"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+        "has_more": false}})");
+    e.be->setWindowVisible(false);
+    e.be->setWindowVisible(true);
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(c, model::parseTs("1700000600.001000")); }));
+    pumpFor(100);
+    CHECK(count("rtm.connect") == connects + 1);
+}
+
+// A message `ago` seconds old, as a history answer (newest first) over "first".
+static std::string historyWith(int64_t ago) {
+    return str::concat(
+        {R"({"conversations.history": {"ok": true, "messages": [
+        {"type": "message", "user": "UMIRA", "text": "late", "ts": ")",
+         str::number(base::nowSecs() - ago),
+         R"(.000100"},
+        {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+        "has_more": false}})"}
+    );
+}
+
+TEST("live rtm: a poll that beats its event is no miss; an old find is") {
+    if (!haveServer())
+        return;
+    for (const int64_t ago : {0, 30}) {
+        Env                        e(true, false);
+        slack::RtmPresence::Timing t;
+        t.reconnectMinMs = 20;
+        e.be->presenceLinkForTest()->setTimingForTest(t);
+        REQUIRE(e.connect());
+        REQUIRE(rtmLive(e));
+        const ConvRef c = e.conv("C1");
+        set(R"({"conversations.history": {"ok": true, "messages": [
+            {"type": "message", "user": "UMIRA", "text": "first", "ts": "1700000600.000800"}],
+            "has_more": false}})");
+        e.be->setActiveConversation(c, 0);
+        REQUIRE(pumpUntil([&] {
+            return e.store.findMessage(c, model::parseTs("1700000600.000800"));
+        }));
+        const int connects = count("rtm.connect");
+        // The poll's answer lands before the RTM frame (ts = now), or brings
+        // one 30 s old the socket never pushed.
+        set(historyWith(ago));
+        const size_t held = e.store.conversation(c).messages.size();
+        e.be->setWindowVisible(false);
+        e.be->setWindowVisible(true); // polls at once
+        REQUIRE(pumpUntil([&] { return e.store.conversation(c).messages.size() > held; }));
+        pumpFor(200);
+        CHECK(count("rtm.connect") == connects + (ago ? 1 : 0));
+    }
+}
+
+TEST("live rtm: a link dropping after each hello backs off and backfills once per 30 s") {
+    if (!haveServer())
+        return;
+    Env e(true, false);
+    // 10x, not 100x: 30 s is 3 s, well past the reconnects below however
+    // the scheduler stalls.
+    e.be.reset();
+    base::test::setEnv("MSGA_SLACK_TEST_SPEEDUP", "10");
+    slack::Credentials cr;
+    cr.token  = "xoxc-test";
+    cr.cookie = "xoxd-test";
+    cr.teamId = "T1";
+    e.be      = std::make_unique<slack::SlackBackend>(e.store, app(), e.client, cr);
+    slack::RtmPresence        *rtm = e.be->presenceLinkForTest();
+    slack::RtmPresence::Timing t;
+    t.reconnectMinMs = 40;
+    t.reconnectMaxMs = 1'000;
+    rtm->setTimingForTest(t);
+    REQUIRE(e.connect());
+    REQUIRE(rtmLive(e));
+    // Hidden: the open chat polls once a minute (6 s here), so its history
+    // calls below are the backfills alone.
+    e.be->setWindowVisible(false);
+    const ConvRef c = e.conv("C1");
+    e.be->setActiveConversation(c, 0);
+    pumpFor(100);
+    const auto history = [] {
+        int       n = 0;
+        const Log log;
+        for (json::Value r : log.doc.root())
+            n += r["method"].str() == "conversations.history" && r["form"]["channel"].str() == "C1";
+        return n;
+    };
+    const int            h0 = history();
+    // Three drops right after hello: back 40, 80, 160 ms later (not 40 each),
+    // all inside 30 s (3 s here) of the first backfill.
+    std::vector<int64_t> gaps;
+    for (int i = 0; i < 3; ++i) {
+        const int     opens = count("ws-open");
+        const int64_t at    = base::monotonicMs();
+        ctl("POST", "/_ctl/ws/close", "{\"conn\":\"" + rtmConn() + "\",\"code\":1001}");
+        REQUIRE(
+            pumpUntil([&] { return count("ws-open") > opens && e.be->hasRealtimePush(); }, 3000)
+        );
+        gaps.push_back(base::monotonicMs() - at);
+    }
+    CHECK(gaps[2] >= 140);
+    pumpFor(50);
+    CHECK(history() - h0 == 1);
 }
 
 TEST("slack realtime: a huddle_thread starts a live huddle, its edit ends it") {

@@ -258,7 +258,7 @@ struct SlackBackend::Write {
         std::function<void()> undo,
         const char           *fine = nullptr
     ) {
-        b.readCall(
+        b.writeCall(
             std::string(method),
             std::move(form),
             [m    = std::string(method),
@@ -298,7 +298,7 @@ struct SlackBackend::Write {
         }
         m->inFlight = true;
         // Retried like a read: a lost mark leaves the chat unread elsewhere.
-        b.readCall(
+        b.writeCall(
             "conversations.mark",
             net::formEncode({{"channel", channel}, {"ts", ts}}),
             [this, channel](const json::Document &, const std::string &err) {
@@ -336,7 +336,7 @@ struct SlackBackend::Write {
                 return;
             }
         reactions.push_back({conv, ts, name, -1});
-        b.readCall(
+        b.writeCall(
             add ? "reactions.add" : "reactions.remove",
             net::formEncode(
                 {{"channel", b.convId(conv)}, {"timestamp", model::formatTs(ts)}, {"name", name}}
@@ -565,7 +565,7 @@ struct SlackBackend::Write {
             addParam(form, "blocks", blocks);
         if (!metadata.empty())
             addParam(form, "metadata", metadata);
-        b.readCall(
+        b.writeCall(
             "chat.update",
             std::move(form),
             [this, conv, ts, text, blocks, metadata, done = std::move(done)](
@@ -765,7 +765,7 @@ struct SlackBackend::Write {
     // number of times. `restore` is the removed copy, put back if Slack
     // refuses.
     void deleteMessage(ConvRef conv, Ts ts, std::shared_ptr<model::Message> restore) {
-        b.readCall(
+        b.writeCall(
             "chat.delete",
             net::formEncode({{"channel", b.convId(conv)}, {"ts", model::formatTs(ts)}}),
             [this, conv, restore](const json::Document &, const std::string &err) {
@@ -1112,7 +1112,7 @@ void SlackBackend::postAgentFiles(
 // chat.delete is idempotent: retried like a read, "already gone" is done.
 void SlackBackend::deleteAgentReply(ConvRef conv, Ts ts, Done done) {
     ts = _write->serverTs(conv, ts);
-    readCall(
+    writeCall(
         "chat.delete",
         net::formEncode({{"channel", convId(conv)}, {"ts", model::formatTs(ts)}}),
         [this, conv, ts, done = std::move(done)](const json::Document &, const std::string &err) {

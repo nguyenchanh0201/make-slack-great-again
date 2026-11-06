@@ -1,5 +1,5 @@
 // The presence link: an RTM WebSocket on a session
-// (xoxc) workspace's own token, held only so Slack counts this app as a
+// (xoxc) workspace's own token, held so Slack counts this app as a
 // connected client. Slack reports a user active only while one of its
 // clients holds a connection (users.getPresence's `online`); the public
 // users.setPresence can force "away" but never "active", so a Web-API-only
@@ -8,8 +8,9 @@
 // rtm.connect works for a session token (not a granular OAuth one), and the
 // wss URL it returns carries no auth: the handshake MUST send the `d` cookie,
 // or Slack answers {"type":"error",…invalid_auth} and drops the socket ~5 s
-// later. Frames on the socket (every conversation's events) are ignored —
-// delivery stays with the polling; only hello, pong and error are read.
+// later. Once start()ed, the socket is held in every presence mode and its
+// event frames go to onEvent (live delivery); the modes then only decide the
+// tickles and what state() reports. Unstarted, it follows the mode alone.
 // Slack pongs RTM pings (unlike Socket Mode), so two missed pongs are a real
 // liveness signal (it also catches a laptop-sleep gap). Input is forwarded
 // as `tickle` frames, the official client's way of resetting auto-away.
@@ -41,8 +42,15 @@ public:
     RtmPresence(const RtmPresence &)            = delete;
     RtmPresence &operator=(const RtmPresence &) = delete;
 
-    // Native drops the link; either holding mode establishes it (WhileUsing
-    // counts the change itself as activity). Idempotent.
+    // Hold the socket from now on, whatever the mode (it carries live
+    // events). Idempotent. Without it the socket follows the mode alone.
+    void start();
+    // Drop the socket and re-establish it (backoff respected): it was found
+    // to have missed events. No-op while it is down anyway.
+    void reconnectNow();
+    // Native drops the link (unless started: then only stops tickles);
+    // either holding mode establishes it (WhileUsing counts the change itself
+    // as activity). Idempotent.
     void setMode(Mode mode);
     Mode mode() const { return _mode; }
     Link state() const { return _state; }
@@ -50,7 +58,11 @@ public:
     // back; both holding modes send a (throttled) tickle.
     void noteActivity();
 
-    std::function<void(Link)> onStateChanged;
+    std::function<void(Link)>                     onStateChanged;
+    // Every frame but hello/pong/error/reconnect_url: the event stream.
+    std::function<void(const json::Value &frame)> onEvent;
+    // Each hello; afterGap: not the first one (the socket was down between).
+    std::function<void(bool afterGap)>            onHello;
 
     // ── Test seams ──────────────────────────────────────────────────────────
     struct Timing {
@@ -63,20 +75,27 @@ public:
     };
     void setTimingForTest(const Timing &t) { _t = t; }
     bool connected() const;
+    // Connected and said hello: events are flowing.
+    bool live() const { return _up && connected(); }
 
 private:
-    bool holding() const { return _mode != Mode::Native; }
+    // Whether the socket should be up: started, or a holding mode not idled
+    // out (only an unstarted WhileUsing drops it when idle).
+    bool holding() const { return _started || (_mode != Mode::Native && !_idle); }
     void ensureHolding();
+    void refreshState(); // _state from mode, idle, refusal and the socket; arms tickles
     void openAndConnect();
     void connectWs(const std::string &url);
     void teardown(); // the socket, the handshake, the link timers; state untouched
     void scheduleReconnect();
+    void resetBackoffIfStable(); // the socket stayed up Timing::stableMs
     void onOpen();
     void onClosed(int code, const std::string &reason);
     void onText(const std::string &text);
     void sendPing();
     void sendTickle(bool force);
     void onIdle();
+    void armIdle();
     void setState(Link s);
     void stopTimer(uint64_t &id);
 
@@ -84,8 +103,12 @@ private:
     Connect                         _connect;
     std::string                     _cookie;
     Timing                          _t;
-    Mode                            _mode  = Mode::Native;
-    Link                            _state = Link::Off;
+    Mode                            _mode     = Mode::Native;
+    Link                            _state    = Link::Off;
+    bool                            _started  = false;
+    bool                            _idle     = false; // WhileUsing: no input for idleMs
+    bool                            _up       = false; // this socket said hello
+    bool                            _hadHello = false; // any socket ever did
     std::unique_ptr<net::WebSocket> _ws;
     // One rtm.connect or socket open at a time (rtm.connect is Tier 1).
     bool                            _connecting     = false;

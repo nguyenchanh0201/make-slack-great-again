@@ -60,10 +60,13 @@ struct Log {
                 return r;
         return {};
     }
-    std::string order() const { // "a,b,c"
+    std::string order() const { // "a,b,c", without the RTM link's own traffic
         std::string s;
-        for (json::Value r : doc.root())
-            s.append(s.empty() ? "" : ",").append(r["method"].str());
+        for (json::Value r : doc.root()) {
+            const std::string_view m = r["method"].str();
+            if (m != "rtm.connect" && m != "ws-open" && !m.starts_with("ws:"))
+                s.append(s.empty() ? "" : ",").append(m);
+        }
         return s;
     }
 };
