@@ -534,6 +534,48 @@ void SettingsDialog::buildAppearance() {
             _content,
             tr("Shown on a message's toolbar: a click adds the reaction, another takes it back.")
         );
+        if (_hooks.fetchSlackReactions) {
+            auto *mine = row(_content)->add<Button>(
+                tr("Use my Slack reactions"), Button::Kind::Secondary, Button::Form::Small
+            );
+            auto *note = caption(_content, "");
+            note->setVisible(false);
+            mine->onClick = [this, modes, slots, note] {
+                note->setText(tr("Reading your Slack reactions\xE2\x80\xA6"));
+                note->setColor(C::FormTextMuted);
+                note->setVisible(true);
+                std::weak_ptr<char> alive = _p->alive;
+                _hooks.fetchSlackReactions([this, alive, modes, slots, note](
+                                               std::vector<std::string> emoji,
+                                               int                      tone,
+                                               std::string              err
+                                           ) {
+                    if (alive.expired())
+                        return;
+                    if (!err.empty() || emoji.empty()) {
+                        note->setText(
+                            err.empty()
+                                ? std::string(tr("Your Slack account has no emoji history"))
+                                : i18n::arg(tr("Could not read your Slack reactions (%1)"), err)
+                        );
+                        note->setColor(C::FormError);
+                        return;
+                    }
+                    // "Frequently used" and the tone apply at once, as the theme
+                    // does; the toolbar's mode is saved with the rest of the page.
+                    const size_t n = emoji.size();
+                    screens::EmojiPicker::restoreState(emoji, tone);
+                    _s.emojiSkinTone = _draft.emojiSkinTone = tone;
+                    _s.emojiRecent = _draft.emojiRecent = std::move(emoji);
+                    changed();
+                    _draft.quickReactions = 1;
+                    modes->setSelected(1);
+                    slots->setVisible(false);
+                    note->setText(i18n::arg(tr("Imported %1 emoji from Slack"), std::to_string(n)));
+                    note->setColor(C::FormTextMuted);
+                });
+            };
+        }
     }
 #endif
 
