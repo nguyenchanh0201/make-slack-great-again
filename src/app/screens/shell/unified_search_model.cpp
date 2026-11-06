@@ -4,23 +4,24 @@
 #include "base/utf8.h"
 
 #include <algorithm>
+#include <iterator>
 #include <unordered_map>
 
 namespace shell {
 
 std::vector<RecentPlace>
-recentPlaces(const model::Store &, const std::vector<model::ConvRef> &order, size_t max) {
+recentPlaces(const std::vector<model::ConvRef> &order, model::ConvRef open, size_t max) {
+    constexpr Sidebar::Nav pages[] = {
+        Sidebar::Nav::Threads, Sidebar::Nav::Saved, Sidebar::Nav::Activity, Sidebar::Nav::Scheduled
+    };
+    const size_t             convs = max > std::size(pages) ? max - std::size(pages) : 0;
     std::vector<RecentPlace> out;
-    for (Sidebar::Nav p :
-         {Sidebar::Nav::Threads,
-          Sidebar::Nav::Saved,
-          Sidebar::Nav::Activity,
-          Sidebar::Nav::Scheduled})
+    for (model::ConvRef c : order)
+        if (c != open && out.size() < convs)
+            out.push_back({c, Sidebar::Nav::None});
+    for (Sidebar::Nav p : pages)
         if (out.size() < max)
             out.push_back({model::kNoConv, p});
-    for (model::ConvRef c : order)
-        if (out.size() < max)
-            out.push_back({c, Sidebar::Nav::None});
     return out;
 }
 
@@ -63,28 +64,33 @@ std::vector<PersonHit> searchPeople(const model::Store &store, std::string_view 
     std::vector<PersonHit> out;
     for (const Scored &s : found) {
         const auto d = dms.find(s.user);
-        out.push_back({s.user, d == dms.end() ? model::kNoConv : d->second});
+        out.push_back({s.user, d == dms.end() ? model::kNoConv : d->second, s.score});
     }
     return out;
 }
 
-std::vector<model::ConvRef> searchChannels(
+std::vector<std::pair<double, model::ConvRef>> searchChannels(
     const model::Store                 &store,
     const std::vector<model::ConvRef>  &order,
     const std::vector<QuickSwitchName> &names,
     std::string_view                    query,
     size_t                              max
 ) {
-    std::vector<model::ConvRef> out;
-    if (str::trim(query).empty())
+    std::vector<std::pair<double, model::ConvRef>> out;
+    const std::string_view                         trimmed = str::trim(query);
+    if (trimmed.empty())
         return out;
-    for (model::ConvRef c : quickSwitchFilter(query, order, names)) {
-        if (store.conversation(c).isDirect())
-            continue;
-        out.push_back(c);
-        if (out.size() == max)
-            break;
-    }
+    // quickSwitchFilter's ranking, keeping the scores: best first, ties in `order`.
+    const std::vector<uint32_t> q = fuzzyQuery(trimmed);
+    for (size_t i = 0; i < order.size() && i < names.size(); ++i)
+        if (!store.conversation(order[i]).isDirect())
+            if (const std::optional<double> s = quickSwitchScore(names[i], q))
+                out.emplace_back(*s, order[i]);
+    std::stable_sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+        return a.first > b.first;
+    });
+    if (out.size() > max)
+        out.resize(max);
     return out;
 }
 

@@ -61,6 +61,7 @@ struct QuickSwitchTab {
     // quickSwitchNames(order), and the store's metaRevision they were made at.
     std::vector<QuickSwitchName> names;
     uint64_t                     namesRev = UINT64_MAX;
+    model::ConvRef               open     = model::kNoConv; // open there: not a Recent place
 };
 
 } // namespace shell

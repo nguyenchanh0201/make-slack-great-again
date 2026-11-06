@@ -96,31 +96,46 @@ TEST("unified model: channels exclude DMs and keep fuzzy order") {
     const auto r     = shell::searchChannels(f.store, order, names, "talk");
     const auto all   = shell::quickSwitchFilter("talk", order, names);
     REQUIRE(r.size() == 2);
-    CHECK(r == all); // the DM never matched "talk"; same order as the switcher
+    // The DM never matched "talk"; same order as the switcher, scores falling.
+    CHECK(r[0].second == all[0]);
+    CHECK(r[1].second == all[1]);
+    CHECK(r[0].first >= r[1].first);
     // "henry" matches the DM by name: not a channel.
     CHECK(shell::searchChannels(f.store, order, names, "henry").empty());
 }
 
 TEST(
-    "unified model: recent places lead with Threads, Saved, Activity, Scheduled then conversations"
+    "unified model: recent places lead with conversations, then Threads, Saved, Activity, "
+    "Scheduled"
 ) {
-    Fixture              f;
     std::vector<ConvRef> order;
-    for (ConvRef c = 0; c < 6; ++c)
-        order.push_back(c % 3);
-    const auto r = shell::recentPlaces(f.store, order);
-    REQUIRE(r.size() == 8);
+    for (ConvRef c = 0; c < 20; ++c)
+        order.push_back(c);
     const Sidebar::Nav pages[] = {
         Sidebar::Nav::Threads, Sidebar::Nav::Saved, Sidebar::Nav::Activity, Sidebar::Nav::Scheduled
     };
-    for (size_t i = 0; i < 4; ++i) {
-        CHECK(r[i].conv == kNoConv);
-        CHECK(r[i].page == pages[i]);
-    }
-    for (size_t i = 4; i < 8; ++i) {
-        CHECK(r[i].conv == order[i - 4]);
+    // Up to 12: eight conversations, the pages always in.
+    auto r = shell::recentPlaces(order);
+    REQUIRE(r.size() == 12);
+    for (size_t i = 0; i < 8; ++i) {
+        CHECK(r[i].conv == order[i]);
         CHECK(r[i].page == Sidebar::Nav::None);
     }
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(r[8 + i].conv == kNoConv);
+        CHECK(r[8 + i].page == pages[i]);
+    }
+    // The open conversation is not a place to go: the next one moves up.
+    r = shell::recentPlaces(order, 0);
+    REQUIRE(r.size() == 12);
+    CHECK(r[0].conv == 1);
+    for (const auto &p : r)
+        CHECK(p.conv != 0);
+    // Few conversations: all of them, then the pages.
+    r = shell::recentPlaces({3, 5}, 5);
+    REQUIRE(r.size() == 5);
+    CHECK(r[0].conv == 3);
+    CHECK(r[1].page == Sidebar::Nav::Threads);
 }
 
 TEST("unified model: empty or whitespace query finds nothing") {
@@ -207,9 +222,14 @@ struct Panel {
     bool                        closed = false;
 
     // `tabs`: the workspaces besides this one (its tab comes first).
+    // `setup`: fills the store before the panel takes its order.
     explicit Panel(
-        std::vector<shell::QuickSwitchTab> others = {}, std::function<Backend *(int)> b = {}
+        std::vector<shell::QuickSwitchTab> others = {},
+        std::function<Backend *(int)>      b      = {},
+        std::function<void(Fixture &)>     setup  = {}
     ) {
+        if (setup)
+            setup(f);
         plat::WindowDesc d;
         d.size    = {1200, 800};
         d.visible = true; // frames (the debounce's ticks) only reach a shown window
@@ -259,7 +279,9 @@ TEST("unified search: empty field lists recent places") {
     REQUIRE(!p.us->rows().empty());
     for (const auto &r : p.us->rows())
         CHECK(r.kind == Kind::Recent);
-    CHECK_STR(p.us->rows()[0].text, "Threads");
+    // The conversations first, then the pages.
+    CHECK_STR(p.us->rows()[0].text, p.f.store.displayName(p.f.order()[0]));
+    CHECK_STR(p.us->rows()[p.us->rows().size() - 4].text, "Threads");
     CHECK(p.us->selected() == 0);
     CHECK(p.backend.pending.empty()); // nothing to search for
 }
@@ -400,4 +422,40 @@ TEST("unified search: a reply after close is dropped") {
     p.backend.pending[0].done(Panel::hits(p.f.talkAi, 5, "talk"));
     CHECK(p.kinds() == kinds);
     pump();
+}
+
+TEST("unified search: the best person or channel is selected first") {
+    Panel p({}, {}, [](Fixture &f) {
+        Conversation c;
+        c.id = "C9", c.name = "general", c.kind = ConvKind::Channel;
+        f.store.addConversation(std::move(c));
+        for (const char *name : {"Gene Ralston", "Generic Bot-free Person"}) {
+            User u;
+            u.id = std::string("U9") + name, u.name = "x", u.displayName = name;
+            f.store.addUser(std::move(u));
+        }
+    });
+    auto  selected = [&] { return p.us->rows()[size_t(p.us->selected())]; };
+    // The channel's name is the query: it beats the people above it.
+    p.us->field().insertText("general");
+    REQUIRE(p.kinds().front() == Kind::Person);
+    CHECK(selected().kind == Kind::Channel);
+    CHECK_STR(selected().text, p.f.store.displayName(p.f.store.findConversation("C9")));
+    // "gene": the person's whole first name, at least as good: people first.
+    p.us->field().setText("gene");
+    CHECK(selected().kind == Kind::Person);
+    CHECK_STR(selected().text, "Gene Ralston");
+    CHECK(p.us->selected() == 0);
+}
+
+TEST("unified search: Enter on Searching… opens the full list") {
+    Panel p;
+    p.us->field().insertText("zzqq words");
+    REQUIRE(p.kinds() == std::vector<Kind>{Kind::Status});
+    press(*p.win, plat::Key::Enter); // before the debounce is out
+    CHECK(p.us->showingAll());
+    CHECK_FALSE(p.closed);
+    p.waitForSearch();
+    p.backend.pending[0].done(Panel::hits(p.f.talkAi, 4, "words"));
+    CHECK(p.kinds() == std::vector<Kind>(4, Kind::FullResult));
 }

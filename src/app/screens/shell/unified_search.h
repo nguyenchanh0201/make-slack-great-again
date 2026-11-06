@@ -53,8 +53,10 @@ public:
 
     ui::TextEdit           &field() { return *_field; }
     const std::vector<Row> &rows() const { return _rows; }
-    int                     selected() const { return _current; } // 0 after every new query
-    void                    choose(int row);   // opens it and closes (AllMessages expands instead)
+    // After every new query: the best person or channel (people win ties), else 0.
+    int                     selected() const { return _current; }
+    // Opens it and closes (AllMessages, or Status while searching, expands instead).
+    void                    choose(int row);
     void                    showAllMessages(); // every hit for the query, no second request
     bool                    showingAll() const { return _all; }
     int                     tab() const { return _tab; }
@@ -82,34 +84,35 @@ private:
     void                rebuild(bool keepPick);
     void                aimTab(const std::string &query);
     void                highlight(int index);
+    int                 bestMatch() const; // the row selected() starts on
     void                refreshStrip();
     const model::Store &store() const { return *_tabs[size_t(_tab)].store; }
     static const std::vector<QuickSwitchName> &names(QuickSwitchTab &t); // brought up to date
 
-    Avatars                               &_avatars;
-    std::vector<QuickSwitchTab>            _tabs;
-    std::function<model::Backend *(int)>   _backendFor;
-    int                                    _tab       = 0;
-    bool                                   _manualTab = false; // picked by hand since typing began
-    std::vector<bool>                      _dimmed;
-    std::string                            _query; // trimmed
-    std::vector<RecentPlace>               _recent;
-    std::vector<PersonHit>                 _people;
-    std::vector<model::ConvRef>            _channels;
-    std::vector<model::Backend::SearchHit> _hits;
-    bool                                   _searching = false; // a search pending or out
-    bool                                   _all       = false;
-    std::vector<Row>                       _rows;
-    int                                    _current       = 0;
-    uint32_t                               _generation    = 0;  // the search a reply belongs to
-    double                                 _debounceStart = -1; // -1: from the next tick
-    bool                                   _debouncing    = false;
-    std::shared_ptr<char>                  _alive         = std::make_shared<char>();
-    ui::TextEdit                          *_field         = nullptr;
-    ui::View                              *_strip         = nullptr;
-    ui::Label                             *_tabName       = nullptr;
-    std::unique_ptr<Adapter>               _adapter;
-    ui::VirtualList                       *_list = nullptr;
+    Avatars                             &_avatars;
+    std::vector<QuickSwitchTab>          _tabs;
+    std::function<model::Backend *(int)> _backendFor;
+    int                                  _tab       = 0;
+    bool                                 _manualTab = false; // picked by hand since typing began
+    std::vector<bool>                    _dimmed;
+    std::string                          _query; // trimmed
+    std::vector<RecentPlace>             _recent;
+    std::vector<PersonHit>               _people;
+    std::vector<std::pair<double, model::ConvRef>> _channels; // scored
+    std::vector<model::Backend::SearchHit>         _hits;
+    bool                                           _searching = false; // a search pending or out
+    bool                                           _all       = false;
+    std::vector<Row>                               _rows;
+    int                                            _current    = 0;
+    uint32_t                                       _generation = 0; // the search a reply belongs to
+    double                                         _debounceStart = -1; // -1: from the next tick
+    bool                                           _debouncing    = false;
+    std::shared_ptr<char>                          _alive         = std::make_shared<char>();
+    ui::TextEdit                                  *_field         = nullptr;
+    ui::View                                      *_strip         = nullptr;
+    ui::Label                                     *_tabName       = nullptr;
+    std::unique_ptr<Adapter>                       _adapter;
+    ui::VirtualList                               *_list = nullptr;
 };
 
 } // namespace shell

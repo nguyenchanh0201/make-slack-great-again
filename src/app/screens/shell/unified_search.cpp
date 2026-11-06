@@ -197,7 +197,7 @@ public:
             pic = _s._avatars.get(st.user(_s._people[r.index].user).avatar, 40);
             break;
         case Kind::Channel:
-            conv = _s._channels[r.index];
+            conv = _s._channels[r.index].second;
             break;
         case Kind::Message:
         case Kind::FullResult: {
@@ -412,9 +412,9 @@ void UnifiedSearch::refreshStrip() {
 void UnifiedSearch::requery() {
     QuickSwitchTab &t = _tabs[size_t(_tab)];
     _query            = std::string(str::trim(_field->text()));
-    _recent   = _query.empty() ? recentPlaces(*t.store, t.order) : std::vector<RecentPlace>();
-    _people   = searchPeople(*t.store, _query);
-    _channels = searchChannels(*t.store, t.order, names(t), _query);
+    _recent           = _query.empty() ? recentPlaces(t.order, t.open) : std::vector<RecentPlace>();
+    _people           = searchPeople(*t.store, _query);
+    _channels         = searchChannels(*t.store, t.order, names(t), _query);
     if (_query.empty())
         _all = false; // clearing the query returns to the groups
     // The old hits answer another query (or workspace): gone, and a reply
@@ -480,7 +480,7 @@ void UnifiedSearch::rebuild(bool keepPick) {
         for (size_t i = 0; i < _people.size(); ++i)
             add(Kind::Person, std::string(st.user(_people[i].user).label()), i);
         for (size_t i = 0; i < _channels.size(); ++i)
-            add(Kind::Channel, st.displayName(_channels[i]), i);
+            add(Kind::Channel, st.displayName(_channels[i].second), i);
         for (size_t i = 0; i < _hits.size() && i < kGroupedHits; ++i)
             add(Kind::Message, searchPreview(st, _hits[i].text), i);
         if (!_hits.empty())
@@ -494,10 +494,18 @@ void UnifiedSearch::rebuild(bool keepPick) {
             0);
     // A late reply only adds rows below the instant groups: the pick stays.
     if (!keepPick || _current >= int(_rows.size()))
-        _current = 0;
+        _current = _all ? 0 : bestMatch();
     _list->reset();
     if (!keepPick)
         _list->scrollTo(0);
+}
+
+// The first person's row, or the first channel's when it scores higher.
+int UnifiedSearch::bestMatch() const {
+    const int people = int(_recent.size()), channels = people + int(_people.size());
+    if (!_channels.empty() && (_people.empty() || _channels[0].first > _people[0].score))
+        return channels;
+    return _people.empty() ? 0 : people;
 }
 
 void UnifiedSearch::highlight(int index) {
@@ -522,8 +530,11 @@ void UnifiedSearch::choose(int index) {
     const Row r = _rows[size_t(index)];
     if (r.kind == Kind::AllMessages)
         return showAllMessages();
-    if (r.kind == Kind::Status)
+    if (r.kind == Kind::Status) { // "Searching…": the reply lands in the full list
+        if (_searching)
+            showAllMessages();
         return;
+    }
     // Copies first: close() lets go of this panel.
     const std::string     key = _tabs[size_t(_tab)].key;
     std::function<void()> act;
@@ -557,7 +568,7 @@ void UnifiedSearch::choose(int index) {
         break;
     }
     case Kind::Channel:
-        act = [f = onOpenConv, key, c = _channels[r.index]] {
+        act = [f = onOpenConv, key, c = _channels[r.index].second] {
             if (f)
                 f(key, c);
         };
