@@ -232,7 +232,7 @@ msgstr "考え中…"
 msgid "Reading files…"
 msgstr "ファイルを読んでいます…"
 
-#: src/app/claude/backend_branch.cpp src/app/screens/shell/composer_popups.cpp src/app/screens/shell/message_search.cpp
+#: src/app/claude/backend_branch.cpp src/app/screens/shell/composer_popups.cpp src/app/screens/shell/unified_search.cpp
 msgid "Searching…"
 msgstr "検索中…"
 
@@ -1547,7 +1547,7 @@ msgstr "12時間表示（午後2:34）"
 msgid "24-hour clock (14:34)"
 msgstr "24時間表示（14:34）"
 
-#: src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/activity_page.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/threads_page.cpp
+#: src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/activity_page.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/threads_page.cpp src/app/screens/shell/unified_search.cpp
 msgid "Threads"
 msgstr "スレッド"
 
@@ -2401,7 +2401,7 @@ msgstr "既読にする"
 msgid "Mark as unread"
 msgstr "未読にする"
 
-#: src/app/screens/shell/activity_page.cpp src/app/screens/shell/sidebar.cpp
+#: src/app/screens/shell/activity_page.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/unified_search.cpp
 msgid "Activity"
 msgstr "アクティビティ"
 
@@ -2485,11 +2485,11 @@ msgstr "チャンネルを検索"
 msgid "Create Channel"
 msgstr "チャンネルを作成"
 
-#: src/app/screens/shell/channel_dialogs.cpp src/app/screens/shell/sidebar.cpp
+#: src/app/screens/shell/channel_dialogs.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/unified_search.cpp
 msgid "Channels"
 msgstr "チャンネル"
 
-#: src/app/screens/shell/channel_dialogs.cpp
+#: src/app/screens/shell/channel_dialogs.cpp src/app/screens/shell/unified_search.cpp
 msgid "People"
 msgstr "メンバー"
 
@@ -2968,7 +2968,7 @@ msgstr "「%1」に一致するメンバーはいません。"
 msgid "Opens the huddle in Slack for web"
 msgstr "Slack（ブラウザ版）でハドルを開きます"
 
-#: src/app/screens/shell/header.cpp src/app/screens/shell/message_search.cpp src/app/screens/shell/shortcuts.cpp
+#: src/app/screens/shell/header.cpp
 msgid "Search messages"
 msgstr "メッセージを検索"
 
@@ -2984,7 +2984,7 @@ msgstr "アクティブ"
 msgid "Away"
 msgstr "離席中"
 
-#: src/app/screens/shell/header.cpp
+#: src/app/screens/shell/header.cpp src/app/screens/shell/unified_search.cpp
 msgid "Messages"
 msgstr "メッセージ"
 
@@ -3003,18 +3003,6 @@ msgstr "ハドルが開催中です"
 #: src/app/screens/shell/message_search.cpp
 msgid "Unknown channel"
 msgstr "不明なチャンネル"
-
-#: src/app/screens/shell/message_search.cpp
-msgid "Search messages…"
-msgstr "メッセージを検索…"
-
-#: src/app/screens/shell/message_search.cpp
-msgid "Close search"
-msgstr "検索を閉じる"
-
-#: src/app/screens/shell/message_search.cpp
-msgid "No results found."
-msgstr "結果が見つかりませんでした。"
 
 #: src/app/screens/shell/profile_card.cpp
 msgid "Workspace Owner"
@@ -3036,31 +3024,11 @@ msgstr "現地時間 %1"
 msgid "Message"
 msgstr "メッセージ"
 
-#: src/app/screens/shell/quick_switcher.cpp
-msgid "Jump to a conversation…"
-msgstr "会話にジャンプ…"
-
-#: src/app/screens/shell/quick_switcher.cpp
-msgid "No conversations match."
-msgstr "一致する会話がありません。"
-
-#: src/app/screens/shell/quick_switcher.cpp
-msgid "%1 to move · %2 to switch workspace · %3 to open"
-msgstr "%1 で移動 · %2 でワークスペースを切り替え · %3 で開く"
-
-#: src/app/screens/shell/quick_switcher.cpp
-msgid "%1 to move · %2 to open"
-msgstr "%1 で移動 · %2 で開く"
-
-#: src/app/screens/shell/quick_switcher.cpp
-msgid "No matches in %1. Other workspaces have some."
-msgstr "%1 には一致する会話がありません。他のワークスペースにはあります。"
-
 #: src/app/screens/shell/saved_page.cpp
 msgid "Reminder set for %1"
 msgstr "リマインダー: %1"
 
-#: src/app/screens/shell/saved_page.cpp src/app/screens/shell/sidebar.cpp
+#: src/app/screens/shell/saved_page.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/unified_search.cpp
 msgid "Saved messages"
 msgstr "保存済みメッセージ"
 
@@ -3080,7 +3048,7 @@ msgstr "スレッド内"
 msgid "Send now"
 msgstr "今すぐ送信"
 
-#: src/app/screens/shell/scheduled_page.cpp src/app/screens/shell/sidebar.cpp
+#: src/app/screens/shell/scheduled_page.cpp src/app/screens/shell/sidebar.cpp src/app/screens/shell/unified_search.cpp
 msgid "Scheduled messages"
 msgstr "予約済みメッセージ"
 
@@ -3173,10 +3141,6 @@ msgid "Log in to workspace"
 msgstr "ワークスペースにログイン"
 
 #: src/app/screens/shell/shell.cpp
-msgid "msga"
-msgstr "msga"
-
-#: src/app/screens/shell/shell.cpp
 msgid "Pin window on top"
 msgstr "ウィンドウを最前面に固定"
 
@@ -3239,6 +3203,14 @@ msgstr "終了"
 #: src/app/screens/shell/shell.cpp
 msgid "Notification status: %1"
 msgstr "通知の状態: %1"
+
+#: src/app/screens/shell/shell.cpp
+msgid "msga"
+msgstr "msga"
+
+#: src/app/screens/shell/shell.cpp src/app/screens/shell/unified_search.cpp
+msgid "Search %1"
+msgstr "%1 を検索"
 
 #: src/app/screens/shell/shell_agents.cpp
 msgid "That session is gone: Claude Code no longer has it."
@@ -3388,6 +3360,10 @@ msgstr "メッセージのリマインダーを設定していました。"
 #: src/app/screens/shell/shortcuts.cpp
 msgid "Jump to a conversation"
 msgstr "会話にジャンプ"
+
+#: src/app/screens/shell/shortcuts.cpp
+msgid "Search"
+msgstr "検索"
 
 #: src/app/screens/shell/shortcuts.cpp
 msgid "New line in message"
@@ -3890,6 +3866,26 @@ msgstr "%1が考え中（%2）…"
 msgid "%1 are thinking…"
 msgstr "%1が考え中…"
 
+#: src/app/screens/shell/unified_search.cpp
+msgid "Recent"
+msgstr "最近"
+
+#: src/app/screens/shell/unified_search.cpp
+msgid "%1 to move · %2 to switch workspace · %3 to open"
+msgstr "%1 で移動 · %2 でワークスペースを切り替え · %3 で開く"
+
+#: src/app/screens/shell/unified_search.cpp
+msgid "%1 to move · %2 to open"
+msgstr "%1 で移動 · %2 で開く"
+
+#: src/app/screens/shell/unified_search.cpp
+msgid "Search all messages for “%1”"
+msgstr "「%1」をすべてのメッセージから検索"
+
+#: src/app/screens/shell/unified_search.cpp
+msgid "No results found."
+msgstr "結果が見つかりませんでした。"
+
 #: src/app/screens/shell/update_bar.cpp
 msgid "A new version of msga is ready to install."
 msgstr "msgaの新しいバージョンをインストールする準備ができました。"
@@ -4128,6 +4124,21 @@ msgstr "ダウンロードに失敗しました: %1"
 #: src/app/update/updater.cpp
 msgid "Downloaded update is corrupt (checksum mismatch)."
 msgstr "ダウンロードした更新ファイルが破損しています（チェックサム不一致）。"
+
+#~ msgid "Search messages…"
+#~ msgstr "メッセージを検索…"
+
+#~ msgid "Close search"
+#~ msgstr "検索を閉じる"
+
+#~ msgid "Jump to a conversation…"
+#~ msgstr "会話にジャンプ…"
+
+#~ msgid "No conversations match."
+#~ msgstr "一致する会話がありません。"
+
+#~ msgid "No matches in %1. Other workspaces have some."
+#~ msgstr "%1 には一致する会話がありません。他のワークスペースにはあります。"
 
 #~ msgid "Just now"
 #~ msgstr "たった今"
