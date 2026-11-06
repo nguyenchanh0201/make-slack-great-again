@@ -328,6 +328,37 @@ TEST("sidebar: a DM or app row's close button hides it; channels have none") {
     CHECK_FALSE(h.sidebar().rowState(bot).exists);
 }
 
+TEST("sidebar: a closed DM that opens again comes back at the top of its section") {
+    Harness    h;
+    const auto firstDm = [&] {
+        for (ConvRef c : h.sidebar().order())
+            if (h.store.conversation(c).isDirect())
+                return c;
+        return kNoConv;
+    };
+    // The fixture's DMs, last of them first to come back.
+    std::vector<ConvRef> dms;
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).isDirect())
+            dms.push_back(c);
+    REQUIRE(dms.size() >= 2);
+    const ConvRef last = dms.back();
+    CHECK(firstDm() != last);
+    REQUIRE(h.sidebar().closeRow(last));
+    pump();
+    CHECK_FALSE(h.sidebar().rowState(last).exists);
+    h.store.updateConversation(last, [](Conversation &c) { c.member = true; }); // conversations.open
+    pump();
+    CHECK(firstDm() == last);
+    // Open again after another one comes back: the latest is on top.
+    const ConvRef other = dms.front();
+    REQUIRE(h.sidebar().closeRow(other));
+    pump();
+    h.store.updateConversation(other, [](Conversation &c) { c.member = true; });
+    pump();
+    CHECK(firstDm() == other);
+}
+
 TEST("sidebar: a DM whose peer was deactivated is not listed") {
     Harness    h;
     // A reinstalled app leaves its old, deactivated bot users behind, each

@@ -811,6 +811,15 @@ Sidebar::Sidebar(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _avatars(
                 break;
             const auto &cv = _ctx.store().conversation(ch.conv);
             ConvRow    *r  = rowFor(ch.conv);
+            // A closed DM or app opened again (its next message, or opened):
+            // to the top of its section.
+            if (ch.conv < _wasMember.size()) {
+                if (!_wasMember[ch.conv] && cv.member && cv.isDirect()) {
+                    std::erase(_reopened, ch.conv);
+                    _reopened.insert(_reopened.begin(), ch.conv);
+                }
+                _wasMember[ch.conv] = cv.member;
+            }
             // Under unreads-only a row comes or goes when its bold state
             // flips (the selected row and Starred stay regardless).
             const bool  filterFlip =
@@ -1015,6 +1024,17 @@ void Sidebar::rebuild() {
         else
             hiddenCh.push_back(c);
     }
+    _wasMember.resize(store.conversationCount());
+    for (ConvRef c = 0; c < store.conversationCount(); ++c)
+        _wasMember[c] = store.conversation(c).member;
+    // The reopened ones lead Direct messages and Agents & apps, latest first.
+    const auto rank = [this](ConvRef c) {
+        return std::find(_reopened.begin(), _reopened.end(), c) - _reopened.begin();
+    };
+    for (int s : {2, 3})
+        std::stable_sort(lists[s].begin(), lists[s].end(), [&](ConvRef a, ConvRef b) {
+            return rank(a) < rank(b);
+        });
     _hiddenChannels = _showAllChannels ? 0 : int(hiddenCh.size());
     if (_showAllChannels)
         lists[1].insert(lists[1].end(), hiddenCh.begin(), hiddenCh.end());

@@ -251,6 +251,10 @@ private:
     Menus                                 *_menus  = nullptr;
     std::vector<ConvRow *>                 _rows;
     std::vector<ConvRow *>                 _rowOf; // by ConvRef: the row, else null
+    // DMs and apps that opened again after being closed, latest first: they
+    // lead their section (as listed). shortcut: this run only, not saved.
+    std::vector<model::ConvRef>            _reopened;
+    std::vector<char>                      _wasMember; // by ConvRef, as last seen
     std::vector<TeammateRow *>             _teamRows;
     std::vector<model::Backend::AgentRole> _team; // as last listed (rebuild)
     std::string                            _selectedTeammate;
