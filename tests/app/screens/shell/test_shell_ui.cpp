@@ -538,6 +538,15 @@ TEST("profile dialog: shows my profile and saves only a change") {
 
 // ── Header and tabs ─────────────────────────────────────────────────────────
 
+TEST("header row: the conversation header sits in the message pane") {
+    Harness            h; // #design open
+    shell::ConvHeader &hd = h.sh->header();
+    CHECK(hd.parent() == h.sh->tabs().parent()); // the main pane, on every platform
+    CHECK_STR(hd.title()->text(), "#design");
+    const ui::RectF bar = h.sh->searchBar()->windowRect();
+    CHECK(hd.windowRect().y >= bar.y + bar.h); // under the title strip
+}
+
 TEST("header: channel members and star, a DM's avatar, huddles only where the service has them") {
     Harness            h;
     shell::ConvHeader &hd = h.sh->header();

@@ -3558,11 +3558,11 @@ TEST("sidebar footer: the avatar menu hides the workspace rail and remembers it"
 }
 
 #ifdef __APPLE__
-TEST("window: full screen drops the title bar strip and puts the header over the right pane") {
+TEST("window: full screen drops the title bar strip; the header row reaches the top") {
     Harness       h;
     plat::Window &w = h.win->native();
     pump();
-    const float stripH = h.sh->header().windowRect().h;
+    const float stripH = h.sh->searchBar()->parent()->windowRect().h;
     CHECK(h.sh->sidebar().windowRect().y >= stripH - 1); // under the strip
     w.setFullscreen(true);
     pump();
@@ -3574,7 +3574,7 @@ TEST("window: full screen drops the title bar strip and puts the header over the
     w.setFullscreen(false);
     pump();
     CHECK(h.sh->sidebar().windowRect().y >= stripH - 1);
-    CHECK(h.sh->header().windowRect().x == 0); // back in the strip, window-wide
+    CHECK(h.sh->header().windowRect().y >= stripH - 1); // the row under the strip again
 }
 #endif
 
@@ -4171,25 +4171,22 @@ TEST("title bar: controls take their presses, empty space drags the window") {
     const ui::PointF   search = centre(hd.search());
     const auto         at = [&](ui::PointF p) { return h.sh->hitTest({double(p.x), double(p.y)}); };
 #ifdef __APPLE__
-    // The unified header: the conversation header is the title bar's
-    // content, its title centred in the window.
-    CHECK(search.y < 40);
+    // The strip holds the search bar alone; the header row is under it.
+    const ui::RectF bar = h.sh->searchBar()->windowRect();
+    CHECK(search.y > bar.y + bar.h);
     CHECK(at(search) == H::Client);
-    const ui::RectF t = hd.title()->windowRect();
-    CHECK(std::abs(t.x + t.w / 2 - 600) < 1);
-    CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar, over the title
+    CHECK(at(centre(hd.title())) == H::Client);        // the row is client area
+    CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar
     CHECK(at({40, 20}) == H::Caption);                 // empty space by the traffic lights
     CHECK(at({600, 2}) == H::Caption); // its edges too: AppKit resizes from its own zone
     CHECK(at({2, 20}) == H::Caption);
     CHECK(at({2, 300}) == H::ResizeLeft);
-    // Settings blocks the header's actions; its backdrop still drags.
+    // A dialog's backdrop over the strip still drags.
     h.sh->openSettings();
     pump();
-    CHECK_FALSE(hd.search()->enabled());
-    CHECK(at(search) == H::Caption);
+    CHECK(at({40, 20}) == H::Caption);
     h.sh->settingsDialog()->close();
     pump();
-    CHECK(hd.search()->enabled());
 #else
     // The 22 px strip above the header: caption, but for its own buttons.
     CHECK(search.y > 22);

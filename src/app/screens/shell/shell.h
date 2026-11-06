@@ -320,8 +320,8 @@ private:
     void        addWorkspace(ui::PointF anchor);
     void        togglePin();  // "Pin window on top"
     void        syncChrome(); // the OS-drawn chrome follows the app theme
-    // macOS full screen: no title bar strip; the conversation header moves
-    // over the right pane, so the rail and the sidebar reach the top.
+    // macOS full screen: no title bar strip, so the rail, the sidebar and
+    // the conversation header reach the top.
     void        syncFullScreenChrome();
     float       titleBarHeight() const; // 0 while the strip is hidden
     void        updateTitleButtons();
@@ -477,10 +477,9 @@ private:
     Sidebar               *_sidebar  = nullptr;
     Composer              *_composer = nullptr;
     ui::View              *_titleBar = nullptr, *_rail = nullptr;
-    float                  _titleBarH  = 0;       // buildTitleBar
-    ui::Label             *_titleLabel = nullptr; // macOS: the workspace, without a header
-    ui::Clickable         *_searchBar  = nullptr; // "Search <workspace>"
-    WorkspaceStack        *_wsStack    = nullptr;
+    float                  _titleBarH = 0;       // buildTitleBar
+    ui::Clickable         *_searchBar = nullptr; // "Search <workspace>"
+    WorkspaceStack        *_wsStack   = nullptr;
     std::vector<Workspace> _workspaces;
     std::string            _activeKey;
     bool                   _haveWorkspaces = false; // setWorkspaces was called

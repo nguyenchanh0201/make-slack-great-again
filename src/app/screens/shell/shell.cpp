@@ -76,7 +76,6 @@ namespace {
 // The unified header (NSWindowToolbarStyleUnifiedCompact), where AppKit
 // does not say how tall its title bar is.
 constexpr float kMacTitleBarH = 38;
-constexpr int kHeaderSlot = 1; // in the title strip: over the fallback title, under the search bar
 #else
 constexpr float kTitleBarH = 22; // the compact title strip (Linux/Windows)
 #endif
@@ -1363,24 +1362,17 @@ Shell::~Shell() {
 }
 
 // The title strip. It continues the rail's window-wide nav gradient, so the
-// two meet without a seam. On macOS it is the unified header instead: the
-// content surface over a subtle rule, as tall as AppKit's title bar, with
-// the conversation header (or the workspace's name) in it and the native
-// traffic lights over its left end; its context menu holds "Pin
+// two meet without a seam. On macOS it is as tall as AppKit's title bar, the
+// native traffic lights over its left end; its context menu holds "Pin
 // window on top" (no pin button beside the traffic lights).
 class TitleStrip final : public View {
 public:
     void paint(gfx::Painter &p) override {
-#ifdef __APPLE__
-        p.fillRect(bounds(), color(C::Surface));
-        p.fillRect({0, height() - 1, width(), 1}, color(C::DividerSubtle));
-#else
         // A custom theme's pinned top_nav_bg is a flat title bar colour.
         if (palette(app() && app()->dark()) == Palette::Custom && customPalette().titleBarBg)
             p.fillRect(bounds(), color(C::TitleBar));
         else
             paintNavGradient(*this, p, C::Rail);
-#endif
     }
     bool onEvent(Event &e) override {
         if (e.type != EventType::ContextMenu || !onContextMenu)
@@ -1427,25 +1419,12 @@ void Shell::buildTitleBar(View *parent) {
     // they sit centred in the header whatever the OS version makes of it.
     const double native = _win.native().titleBarHeight();
     _titleBarH          = native > 0 ? float(std::round(native)) : kMacTitleBarH;
-    _titleBar->style().stack().height(_titleBarH).noShrink();
-    // The fallback title while no conversation header shows: the
-    // workspace, centred in the window, clear of the traffic lights.
-    _titleLabel = _titleBar->add<Label>(tr("msga"), Font::UnifiedTitle);
-    _titleLabel->setMaxLines(1);
-    _titleLabel->setAlign(text::LayoutOptions::Align::Center);
-    _titleLabel->setHitTransparent(true);
-    _titleLabel->style().margins(112, 0, 112, 1);
-    // Clear of the traffic lights; on the right, shortcut: room for the unified
-    // header's actions while it shares the strip (Task 4 moves it out).
-    View *row = _titleBar->add<View>();
-    row->style().row().items(Align::Center).padding(80, 0, 200, 0);
-    row->setHitTransparent(true);
+    _titleBar->style().padding(80, 0, 0, 0); // clear of the traffic lights
 #else
-    _titleBarH = kTitleBarH;
-    _titleBar->style().row().height(kTitleBarH).noShrink().items(Align::Center);
-    View *row = _titleBar; // the window controls follow
+    _titleBarH = kTitleBarH; // the window controls follow the bar
 #endif
-    auto *bar = row->add<SearchBar>(std::max(_titleBarH - 12, 18.f));
+    _titleBar->style().row().height(_titleBarH).noShrink().items(Align::Center);
+    auto *bar = _titleBar->add<SearchBar>(std::max(_titleBarH - 12, 18.f));
     bar->style().margins(8, 0, 8, 0);
     bar->onClick          = [this] { openUnifiedSearch(); };
     _searchBar            = bar;
@@ -1525,17 +1504,8 @@ void Shell::syncChrome() {
 
 void Shell::syncFullScreenChrome() {
 #ifdef __APPLE__
-    if (!_titleBar || !_header || !_mainPane)
-        return;
-    const bool full = _win.native().isFullscreen();
-    View      *to   = full ? _mainPane : _titleBar;
-    if (_header->parent() == to)
-        return;
-    std::unique_ptr<View> h = _header->parent()->remove(_header);
-    // Over the pane it keeps the strip's height, the tabs right under it.
-    h->style().height(_titleBarH).noShrink();
-    to->adopt(std::move(h), full ? 0 : kHeaderSlot);
-    _titleBar->setVisible(!full);
+    if (_titleBar)
+        _titleBar->setVisible(!_win.native().isFullscreen());
 #endif
 }
 
@@ -1605,14 +1575,7 @@ void Shell::buildMain(View *parent) {
     _mainPane->style().flex(1);
     _mainPane->style().minW = 360;
 
-#ifdef __APPLE__
-    // The header is the unified title bar's, under the search bar.
-    _header = static_cast<ConvHeader *>(
-        _titleBar->adopt(std::make_unique<ConvHeader>(_ctx, _avatars), kHeaderSlot)
-    );
-#else
-    _header = _mainPane->add<ConvHeader>(_ctx, _avatars);
-#endif
+    _header               = _mainPane->add<ConvHeader>(_ctx, _avatars);
     _header->onSearch     = [this] { openUnifiedSearch(); };
     _tabs                 = _mainPane->add<ConvTabs>();
     _tabs->onSelect       = [this](int tab) { showCanvas(tab == 1); };
@@ -3118,16 +3081,8 @@ void Shell::openSettingsAt(uint8_t page) {
     dlg->onClosed = [this, dlg] {
         if (_settingsDlg == dlg)
             _settingsDlg = nullptr;
-#ifdef __APPLE__
-        _header->setEnabled(true);
-#endif
     };
     _settingsDlg = dlg;
-#ifdef __APPLE__
-    // Settings covers the body, but the unified header is in the title bar:
-    // its actions are blocked while Settings is open.
-    _header->setEnabled(false);
-#endif
     _win.showPopup(std::unique_ptr<Popup>(dlg));
     dlg->sections().focus();
 }
@@ -3210,11 +3165,9 @@ void Shell::refreshRail() {
     _addBtn->style().margins(0, _wsStack->count() ? 16 : 0, 0, 0);
     _wsStack->update();
     updateAttention();
-    // The title and the search bar: the open workspace's name, "msga" without one.
+    // The search bar: the open workspace's name, "msga" without one.
     const std::string &ws   = _ctx.store().workspaceName;
     const std::string  name = _signedIn && !ws.empty() ? ws : std::string(tr("msga"));
-    if (_titleLabel)
-        _titleLabel->setText(name);
     if (_searchBar)
         static_cast<SearchBar *>(_searchBar)->setText(i18n::arg(tr("Search %1"), name));
 }
@@ -3625,12 +3578,13 @@ void Shell::openUnifiedSearch() {
         if (reach(key))
             jumpToMessage(conv, ts, 0);
     };
-    // Under the bar; centred near the top while the title bar is hidden.
+    // Under the bar; centred near the top while the title bar is hidden
+    // (clear of the edge, where full screen's menu bar slides in).
     if (_searchBar && titleBarHeight() > 0) {
         p->setAnchor(_searchBar->windowRect(), Popup::Place::Below);
     } else {
         const SizeF ws = _win.size();
-        p->setAnchor({(ws.w - 600) / 2, 0, 600, 0}, Popup::Place::Below);
+        p->setAnchor({(ws.w - 600) / 2, 90, 600, 0}, Popup::Place::Below);
     }
     p->onClosed = [this, raw] {
         if (_unified == raw)

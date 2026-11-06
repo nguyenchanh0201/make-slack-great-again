@@ -257,6 +257,32 @@ TEST("shortcuts: Ctrl+, opens Settings, Ctrl+W closes it, then the window") {
     CHECK(h.closeRequests == 1); // nothing open: the window's close (hide to tray)
 }
 
+TEST("header row: full screen keeps the header and ⌘F opens search") {
+    Harness h;
+    h.win->native().setFullscreen(true); // StateChanged: syncFullScreenChrome
+    pump();
+#ifdef __APPLE__
+    CHECK_FALSE(h.sh->searchBar()->parent()->visible()); // the title strip
+#endif
+    shell::ConvHeader &hd = h.sh->header();
+    CHECK(hd.visible());
+    CHECK(hd.parent() == h.sh->tabs().parent());
+    h.chord(kCtrl, K::F);
+    pump();
+    shell::UnifiedSearch *us = h.sh->unifiedSearch();
+    REQUIRE(us != nullptr);
+#ifdef __APPLE__
+    CHECK(us->windowRect().y >= 90); // clear of the top edge, the strip hidden
+#endif
+    us->close();
+    pump();
+    h.win->native().setFullscreen(false);
+    pump();
+#ifdef __APPLE__
+    CHECK(h.sh->searchBar()->parent()->visible()); // the strip is back
+#endif
+}
+
 TEST("search bar: a click, ⌘F and ⌘K open the same panel") {
     Harness        h;
     ui::Clickable *bar = h.sh->searchBar();

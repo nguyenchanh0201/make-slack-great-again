@@ -288,50 +288,22 @@ std::string huddleJoinUrl(const model::Store &st, ConvRef conv) {
 }
 
 ConvHeader::ConvHeader(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _avatars(avatars) {
-#ifdef __APPLE__
-    // The macOS unified header, which Shell puts in the title bar: the name centred in the window
-    // between a blank column and the actions, both 200 px wide (room for the members button beside
-    // the three icons), over the title bar's bottom rule.
-    constexpr float kActionsW = 200;
-    style().row().margins(0, 0, 0, 1);
-    setBackground(C::Surface);
-    add<View>()->style().width(kActionsW).noShrink();
-    View *heading = add<View>();
-    heading->style().row().flex(1).items(Align::Center);
-    heading->add<View>()->style().flex(1);
-    View *actions = add<View>();
-    actions->style().row().width(kActionsW).padding(0, 0, 8, 0).spacing(2).noShrink();
-    actions->style().items(Align::Center);
-    actions->add<View>()->style().flex(1);
-#else
     style().row().height(48).padding(16, 0, 8, 0).spacing(8).items(Align::Center).noShrink();
-    View *heading = this, *actions = this;
-#endif
-    _avatar = heading->add<HeaderAvatar>();
+    _avatar = add<HeaderAvatar>();
     _avatar->setVisible(false);
     _avatar->onClick = [this] {
         if (_avatar->isGroup() && _ctx.backend.capabilities().memberList)
             openMembers(_avatar->windowRect());
     };
-#ifdef __APPLE__
-    _avatar->style().margins(0, 0, 8, 0);
-    _title = heading->add<Label>("", Font::UnifiedTitle);
-    _title->setMaxLines(1);
-    _title->setAlign(text::LayoutOptions::Align::Center);
-    // Not a control: a press on the name drags the window (Shell::hitTest).
-    _title->setHitTransparent(true);
-    heading->add<View>()->style().flex(1);
-#else
-    _title = heading->add<Label>("", Font::HeaderTitle);
+    _title = add<Label>("", Font::HeaderTitle);
     _title->setMaxLines(1);
     _title->style().flex(1).shrink = 1;
-#endif
-    auto *members = actions->add<MembersButton>();
+    auto *members                  = add<MembersButton>();
     members->style().margins(0, 0, 2, 0);
     members->onClick = [this, members] { openMembers(members->windowRect()); };
     _members         = members;
     _count           = members->count;
-    auto *huddle     = actions->add<GlyphButton>(
+    auto *huddle     = add<GlyphButton>(
         Icon::Headphones, 28, 16, C::FormIcon, tr("Opens the huddle in Slack for web")
     );
     huddle->style().margins(0, 0, 2, 0);
@@ -340,14 +312,13 @@ ConvHeader::ConvHeader(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _av
             _ctx.openUrl(huddleJoinUrl(_ctx.store, _conv));
     };
     _huddle = huddle;
-    _star   = actions->add<StarButton>();
+    _star   = add<StarButton>();
     _star->style().margins(0, 0, 2, 0);
     _star->onClick = [this] {
         if (_conv != kNoConv)
             _ctx.backend.setStarred(_conv, !_ctx.store().conversation(_conv).starred);
     };
-    auto *search =
-        actions->add<GlyphButton>(Icon::Search, 32, 16, C::FormIcon, tr("Search messages"));
+    auto *search    = add<GlyphButton>(Icon::Search, 32, 16, C::FormIcon, tr("Search messages"));
     search->onClick = [this] {
         if (onSearch)
             onSearch();
