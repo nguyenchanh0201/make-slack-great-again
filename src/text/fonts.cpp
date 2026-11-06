@@ -31,6 +31,7 @@ constexpr const char *kUiFamilies[] = {
 #if defined(_WIN32)
     "segoe ui",
 #elif defined(__APPLE__)
+    "lato",        // personal: Slack's UI font first when installed
     "system font", // SFNS.ttf, San Francisco's variable face
     "helvetica neue",
 #endif
