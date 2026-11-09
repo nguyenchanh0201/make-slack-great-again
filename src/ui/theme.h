@@ -214,17 +214,19 @@ void  resolveSpans(text::AttributedText &t);
 enum class Palette : uint8_t { Purple, Charcoal, Blue, Green, Custom, Count };
 
 // A user-defined palette in Slack's shape: four colours and the switches.
+// Defaults match Slack's Raspberry Beret custom theme.
 struct CustomPalette {
-    Color primary         = 0xff3f0e40; // the rail
-    Color highlight1      = 0xff3f0e40; // selection pill and accent
-    Color highlight2      = 0xff2bac76; // presence dot
-    Color important       = 0xffcd2553; // mention badge
+    Color primary         = 0xfff4daff; // the rail
+    Color highlight1      = 0xff9e0b2e; // selection pill and accent
+    Color highlight2      = 0xff83388a; // presence dot
+    Color important       = 0xffc01343; // mention badge
     int   brightness      = 6;          // 0–10, 6 = the rail as designed
     bool  sidebarInverted = true;       // a dark rail over light content
     bool  gradient        = true;       // blend primary and selection hues in navigation chrome
     // Pins a legacy Slack theme string names outright; 0 = derive: menu_bg / hover_item,
     // active_item_text, text_color, top_nav_bg, top_nav_text.
-    Color itemHover = 0, itemSelText = 0, itemText = 0, titleBarBg = 0, titleBarText = 0;
+    Color itemHover = 0xffe8dfea, itemSelText = 0xffffffff, itemText = 0xff5b395e,
+          titleBarBg = 0, titleBarText = 0xff340a38;
 };
 
 // Everything a preview card paints for one palette in one mode.

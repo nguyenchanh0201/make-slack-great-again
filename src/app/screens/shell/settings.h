@@ -44,7 +44,7 @@ struct Settings {
     bool          showRail    = true; // the workspace rail; the footer's toggle hides it
 
     // ── Appearance ──────────────────────────────────────────────────────────
-    int                      paletteLight = 0, paletteDark = 1; // ui::Palette per content mode
+    int                      paletteLight = 4, paletteDark = 4; // ui::Palette::Custom (Raspberry Beret)
     ui::CustomPalette        custom;
     int                      fontSize = 1; // 0 small, 1 medium, 2 large (App::setUserTextScale)
     std::string              language = "system"; // "system", "en", "ja"
