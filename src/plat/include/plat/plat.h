@@ -351,6 +351,27 @@ enum class EventType : uint8_t {
     Resumed,        // woke from sleep: sockets are probably dead, reconnect
 };
 
+enum class CompositionEnd : uint8_t { None, Commit, Cancel };
+
+struct TextRange {
+    uint32_t begin = 0, end = 0; // half-open committed UTF-8 bytes
+    bool operator==(const TextRange &) const = default;
+};
+
+struct TextComposition {
+    TextRange   replacement;
+    std::string text;
+    TextRange   selection; // UTF-8 bytes relative to composition text
+    bool operator==(const TextComposition &) const = default;
+};
+
+struct TextDocument {
+    std::string                    text; // committed text only
+    uint32_t                       anchor = 0, caret = 0;
+    std::optional<TextComposition> composition;
+    bool operator==(const TextDocument &) const = default;
+};
+
 struct Event {
     EventType type   = EventType::None;
     Window   *window = nullptr;
@@ -366,6 +387,8 @@ struct Event {
     bool        repeat   = false;
     std::string text; // TextInput / TextPreedit / Drop(text) — UTF-8
     int         preeditCursorBegin = -1, preeditCursorEnd = -1; // byte offsets, -1 = hidden
+    std::optional<TextRange> textReplacement;
+    CompositionEnd compositionEnd = CompositionEnd::None;
     std::vector<std::string> uris; // Drop: file:// URIs (local files) or other URIs
 
     ScrollPhase phase     = ScrollPhase::None; // Scroll
@@ -435,6 +458,8 @@ struct WindowDesc {
 struct TextInputState {
     bool enabled = false;
     Rect caret; // logical, relative to the window — where the IME candidate box goes
+    std::optional<TextDocument> document;
+    bool operator==(const TextInputState &) const = default;
 };
 
 class Window {

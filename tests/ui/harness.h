@@ -13,8 +13,9 @@
 #include <memory>
 
 namespace plat::testing_internal {
-Cursor headlessCursor(Window &w);
-int    headlessFrames(Window &w);
+Cursor                headlessCursor(Window &w);
+int                   headlessFrames(Window &w);
+const TextInputState &headlessTextInput(Window &w);
 } // namespace plat::testing_internal
 
 namespace uitest {

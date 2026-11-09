@@ -33,6 +33,7 @@ TextEdit::TextEdit() : _alive(std::make_shared<char>(0)) {
 }
 
 TextEdit::~TextEdit() {
+    finishComposition(true);
     if (_blinkTimer)
         app()->cancelTimer(_blinkTimer);
 }
@@ -51,15 +52,47 @@ uint32_t TextEdit::nextChar(uint32_t o) const {
 // scale by 3 and there is never a preedit.
 constexpr uint32_t kBulletBytes = 3;
 
+namespace {
+bool isValidRange(std::string_view text, uint32_t begin, uint32_t end) {
+    if (begin > end || end > text.size())
+        return false;
+    if (begin > 0 && begin < text.size() && (uint8_t(text[begin]) & 0xC0) == 0x80)
+        return false;
+    if (end > 0 && end < text.size() && (uint8_t(text[end]) & 0xC0) == 0x80)
+        return false;
+    return true;
+}
+} // namespace
+
 uint32_t TextEdit::toDisplay(uint32_t m) const {
     if (_masked)
         return m * kBulletBytes;
+    if (_composition) {
+        const uint32_t replFrom = _composition->replacement.begin;
+        const uint32_t replTo   = _composition->replacement.end;
+        const uint32_t peLen    = uint32_t(_composition->text.size());
+        if (m <= replFrom)
+            return m;
+        if (m <= replTo)
+            return replFrom + peLen;
+        return m - (replTo - replFrom) + peLen;
+    }
     return !_preedit.empty() && m >= _preeditPos ? m + uint32_t(_preedit.size()) : m;
 }
 
 uint32_t TextEdit::toModel(uint32_t d) const {
     if (_masked)
         return std::min(d / kBulletBytes, uint32_t(_text.size()));
+    if (_composition) {
+        const uint32_t replFrom = _composition->replacement.begin;
+        const uint32_t replTo   = _composition->replacement.end;
+        const uint32_t peLen    = uint32_t(_composition->text.size());
+        if (d < replFrom)
+            return std::min(d, uint32_t(_text.size()));
+        if (d < replFrom + peLen)
+            return replFrom;
+        return std::min(replTo + (d - (replFrom + peLen)), uint32_t(_text.size()));
+    }
     if (_preedit.empty() || d < _preeditPos)
         return std::min(d, uint32_t(_text.size()));
     if (d < _preeditPos + _preedit.size())
@@ -150,6 +183,28 @@ void TextEdit::dropParaAt(uint32_t modelPos) {
     _parasDirty = true;
 }
 
+void TextEdit::dropParasInRange(uint32_t from, uint32_t to) {
+    if (_paras.empty())
+        return;
+    size_t lo = 0, hi = _paras.size();
+    while (hi - lo > 1) {
+        const size_t mid                      = (lo + hi) / 2;
+        (_paras[mid].start <= from ? lo : hi) = mid;
+    }
+    const size_t i0 = lo;
+    lo = 0;
+    hi = _paras.size();
+    const uint32_t endPos = std::max(from, to);
+    while (hi - lo > 1) {
+        const size_t mid                        = (lo + hi) / 2;
+        (_paras[mid].start <= endPos ? lo : hi) = mid;
+    }
+    const size_t i1 = lo;
+    for (size_t i = i0; i <= i1 && i < _paras.size(); ++i)
+        _paras[i].layout.reset();
+    _parasDirty = true;
+}
+
 void TextEdit::dropLayouts() {
     for (Para &p : _paras)
         p.layout.reset();
@@ -157,12 +212,18 @@ void TextEdit::dropLayouts() {
 }
 
 bool TextEdit::holdsPreedit(const Para &p) const {
+    if (_composition) {
+        const uint32_t replFrom = _composition->replacement.begin;
+        return replFrom >= p.start && replFrom <= p.start + p.len;
+    }
     return !_preedit.empty() && _preeditPos >= p.start && _preeditPos <= p.start + p.len;
 }
 
 uint32_t TextEdit::paraStart(size_t i) const {
     if (_masked)
         return 0;
+    if (_composition)
+        return toDisplay(_paras[i].start);
     const uint32_t s = _paras[i].start;
     return !_preedit.empty() && s > _preeditPos ? s + uint32_t(_preedit.size()) : s;
 }
@@ -171,6 +232,8 @@ uint32_t TextEdit::paraLen(size_t i) const {
     const Para &p = _paras[i];
     if (_masked)
         return p.len * kBulletBytes;
+    if (_composition)
+        return toDisplay(p.start + p.len) - toDisplay(p.start);
     return p.len + (holdsPreedit(p) ? uint32_t(_preedit.size()) : 0);
 }
 
@@ -249,13 +312,37 @@ std::unique_ptr<text::Layout> TextEdit::buildPara(const Para &p, float w) const 
             dots += "\xE2\x80\xA2";
         t.append(dots, base);
     } else if (!holdsPreedit(p)) {
-        appendRange(a, b);
+        if (_composition) {
+            const uint32_t replFrom = _composition->replacement.begin;
+            const uint32_t replTo   = _composition->replacement.end;
+            if (b <= replFrom || a >= replTo) {
+                appendRange(a, b);
+            } else {
+                if (a < replFrom)
+                    appendRange(a, replFrom);
+                if (b > replTo)
+                    appendRange(replTo, b);
+            }
+        } else {
+            appendRange(a, b);
+        }
     } else {
-        appendRange(a, _preeditPos);
-        text::Style pe = _preeditPos > 0 ? styleFor(_fmt[_preeditPos - 1]) : base;
-        pe.underline   = true;
-        t.append(_preedit, pe);
-        appendRange(_preeditPos, b);
+        if (_composition) {
+            const uint32_t replFrom = _composition->replacement.begin;
+            const uint32_t replTo   = _composition->replacement.end;
+            appendRange(a, replFrom);
+            text::Style pe = replFrom > 0 ? styleFor(_fmt[replFrom - 1]) : base;
+            pe.underline   = true;
+            t.append(_composition->text, pe);
+            if (b > replTo)
+                appendRange(std::max(replTo, replFrom), b);
+        } else {
+            appendRange(a, _preeditPos);
+            text::Style pe = _preeditPos > 0 ? styleFor(_fmt[_preeditPos - 1]) : base;
+            pe.underline   = true;
+            t.append(_preedit, pe);
+            appendRange(_preeditPos, b);
+        }
     }
     // An empty line is as tall as its line break's style (for the last
     // line, the break before it), as in one layout of the whole text.
@@ -453,7 +540,12 @@ bool TextEdit::caretOnEdgeLine(bool top) const {
 RectF TextEdit::caretRect() const {
     const_cast<TextEdit *>(this)->currentLayout();
     uint32_t d = toDisplay(_caret);
-    if (!_preedit.empty())
+    if (_composition) {
+        const uint32_t replFrom = _composition->replacement.begin;
+        const uint32_t peLen    = uint32_t(_composition->text.size());
+        uint32_t cur = _preeditCursor < 0 ? peLen : uint32_t(std::clamp(_preeditCursor, 0, int(peLen)));
+        d = replFrom + cur;
+    } else if (!_preedit.empty()) {
         d = _preeditPos + uint32_t(
                               std::clamp(
                                   _preeditCursor < 0 ? int(_preedit.size()) : _preeditCursor,
@@ -461,6 +553,7 @@ RectF TextEdit::caretRect() const {
                                   int(_preedit.size())
                               )
                           );
+    }
     RectF        r = docCaretRect(d);
     const Style &s = currentStyle();
     r.x += s.pad.l;
@@ -488,12 +581,49 @@ void TextEdit::ensureCaretVisible() {
         update();
 }
 
+void TextEdit::finishComposition(bool commit) {
+    if (!_composition && _preedit.empty())
+        return;
+    auto comp = std::move(_composition);
+    _composition.reset();
+    _preedit.clear();
+    _preeditCursor = -1;
+    if (comp)
+        dropParasInRange(comp->replacement.begin, comp->replacement.end);
+    else
+        dropParaAt(_preeditPos);
+    if (commit && comp) {
+        const uint32_t replFrom = comp->replacement.begin;
+        const uint32_t replTo   = comp->replacement.end;
+        const std::string text  = std::move(comp->text);
+        if (!text.empty() || replFrom != replTo) {
+            const uint16_t f = typingFormat();
+            replace(replFrom, replTo, text, nullptr, f, EditKind::Typing);
+        } else {
+            contentChanged();
+        }
+    } else {
+        update();
+        updateIme();
+    }
+}
+
 void TextEdit::updateIme() {
     if (!window() || !focused())
         return;
     const RectF  r = caretRect();
     const PointF o = mapToWindow({r.x, r.y});
-    window()->setTextInput(true, {o.x, o.y, r.w, r.h});
+    std::optional<plat::TextDocument> doc;
+    if (!_masked) {
+        plat::TextDocument d;
+        d.text   = _text;
+        d.anchor = _anchor;
+        d.caret  = _caret;
+        if (_composition)
+            d.composition = _composition;
+        doc = std::move(d);
+    }
+    window()->setTextInput(true, {o.x, o.y, r.w, r.h}, std::move(doc));
 }
 
 // ── Caret blink ─────────────────────────────────────────────────────────────
@@ -690,6 +820,7 @@ void TextEdit::moveTo(uint32_t c, bool extend) {
 // ── Public editing API ──────────────────────────────────────────────────────
 
 void TextEdit::setText(std::string_view plain) {
+    finishComposition(false);
     _squiggles.clear();
     _wavesValid = false;
     _text.assign(_maxLength ? plain.substr(0, utf8::prefixBytes(plain, _maxLength)) : plain);
@@ -707,11 +838,13 @@ void TextEdit::setText(std::string_view plain) {
 }
 
 void TextEdit::insertText(std::string_view s) {
+    finishComposition(true);
     const uint16_t f = typingFormat();
     replace(std::min(_caret, _anchor), std::max(_caret, _anchor), s, nullptr, f, EditKind::Other);
 }
 
 void TextEdit::insertHtml(std::string_view html) {
+    finishComposition(true);
     std::string              t;
     std::vector<uint16_t>    f;
     std::vector<std::string> links;
@@ -758,6 +891,7 @@ std::string TextEdit::html() const {
 }
 
 void TextEdit::setSelection(uint32_t a, uint32_t c) {
+    finishComposition(true);
     a       = std::min(a, uint32_t(_text.size()));
     _anchor = a;
     _caret  = uint32_t(-1); // force moveTo to act
@@ -774,6 +908,7 @@ std::string TextEdit::selectedText() const {
 }
 
 void TextEdit::toggleFormat(Format f) {
+    finishComposition(true);
     if (!hasSelection()) {
         _typing    = uint16_t(typingFormat() ^ f);
         _typingSet = true;
@@ -802,6 +937,7 @@ bool TextEdit::formatActive(Format f) const {
 }
 
 void TextEdit::setLink(std::string url) {
+    finishComposition(true);
     if (!hasSelection())
         return;
     uint16_t idx = 0;
@@ -852,6 +988,7 @@ void TextEdit::setFont(Font f) {
 }
 
 bool TextEdit::undo() {
+    finishComposition(true);
     if (_undo.empty())
         return false;
     Edit e = std::move(_undo.back());
@@ -866,6 +1003,7 @@ bool TextEdit::undo() {
 }
 
 bool TextEdit::redo() {
+    finishComposition(true);
     if (_redo.empty())
         return false;
     Edit e = std::move(_redo.back());
@@ -891,6 +1029,7 @@ void TextEdit::copy() {
 }
 
 void TextEdit::cut() {
+    finishComposition(true);
     if (!hasSelection() || _masked)
         return;
     copy();
@@ -1195,11 +1334,7 @@ bool TextEdit::onEvent(Event &e) {
         if (onFocusChange)
             onFocusChange(false);
         stopBlink();
-        if (!_preedit.empty()) {
-            dropParaAt(_preeditPos);
-            _preedit.clear();
-            contentChanged();
-        }
+        finishComposition(true);
         if (window())
             window()->setTextInput(false, {});
         update();
@@ -1211,20 +1346,33 @@ bool TextEdit::onEvent(Event &e) {
         for (char c : e.raw->text) // drop control characters (except newline)
             if ((uint8_t(c) >= 0x20 || c == '\n') && c != 0x7f)
                 t.push_back(c);
-        const bool hadPreedit = !_preedit.empty();
-        if (hadPreedit)
-            dropParaAt(_preeditPos);
+        uint32_t from = 0, to = 0;
+        if (e.raw->textReplacement) {
+            if (!isValidRange(_text, e.raw->textReplacement->begin, e.raw->textReplacement->end))
+                return true;
+            from = e.raw->textReplacement->begin;
+            to   = e.raw->textReplacement->end;
+        } else if (_composition) {
+            from = _composition->replacement.begin;
+            to   = _composition->replacement.end;
+        } else {
+            from = std::min(_caret, _anchor);
+            to   = std::max(_caret, _anchor);
+        }
+        _composition.reset();
         _preedit.clear();
+        _preeditCursor = -1;
+        dropParasInRange(from, to);
         if (t.empty()) {
-            if (hadPreedit)
+            if (from < to)
+                replace(from, to, {}, nullptr, 0, EditKind::Typing);
+            else
                 contentChanged();
             return true;
         }
         const uint16_t f    = typingFormat();
         const bool     keep = _typingSet;
-        replace(
-            std::min(_caret, _anchor), std::max(_caret, _anchor), t, nullptr, f, EditKind::Typing
-        );
+        replace(from, to, t, nullptr, f, EditKind::Typing);
         if (keep) { // an explicit toggle holds for the rest of the typing run
             _typing    = f;
             _typingSet = true;
@@ -1234,27 +1382,55 @@ bool TextEdit::onEvent(Event &e) {
     case EventType::TextPreedit: {
         if (!e.raw || _masked)
             return false;
-        if (!_preedit.empty())
-            dropParaAt(_preeditPos); // where it showed
-        if (e.raw->text.empty()) {
-            if (_preedit.empty())
-                return true;
-            _preedit.clear();
-        } else {
-            if (_preedit.empty() && hasSelection())
-                deleteSelection();
-            if (_preedit.empty())
-                _preeditPos = std::min(_caret, uint32_t(_text.size()));
-            _preedit       = e.raw->text;
-            _preeditCursor = e.raw->preeditCursorBegin;
-            dropParaAt(_preeditPos);
+        if (e.raw->compositionEnd == plat::CompositionEnd::Commit) {
+            finishComposition(true);
+            return true;
         }
+        if (e.raw->compositionEnd == plat::CompositionEnd::Cancel) {
+            finishComposition(false);
+            return true;
+        }
+        if (e.raw->text.empty() && !e.raw->textReplacement && !_composition) {
+            if (!_preedit.empty()) {
+                _preedit.clear();
+                _preeditCursor = -1;
+                dropParaAt(_preeditPos);
+                contentChanged();
+            }
+            return true;
+        }
+        plat::TextRange repl;
+        if (e.raw->textReplacement) {
+            if (!isValidRange(_text, e.raw->textReplacement->begin, e.raw->textReplacement->end))
+                return true;
+            repl = *e.raw->textReplacement;
+        } else if (_composition) {
+            repl = _composition->replacement;
+        } else {
+            repl = {std::min(_caret, _anchor), std::max(_caret, _anchor)};
+        }
+        plat::TextComposition comp;
+        comp.replacement = repl;
+        comp.text        = e.raw->text;
+        const uint32_t peLen = uint32_t(comp.text.size());
+        uint32_t selStart = e.raw->preeditCursorBegin < 0
+                                ? peLen
+                                : uint32_t(std::clamp(e.raw->preeditCursorBegin, 0, int(peLen)));
+        uint32_t selEnd   = e.raw->preeditCursorEnd < 0
+                                ? selStart
+                                : uint32_t(std::clamp(e.raw->preeditCursorEnd, int(selStart), int(peLen)));
+        comp.selection    = {selStart, selEnd};
+        _composition      = std::move(comp);
+        _preedit          = e.raw->text;
+        _preeditCursor    = e.raw->preeditCursorBegin;
+        dropParasInRange(repl.begin, repl.end);
         invalidateLayout();
         update();
         updateIme();
         return true;
     }
     case EventType::PointerDown: {
+        finishComposition(true);
         if (e.button == plat::Button::Middle) {
 #if defined(__linux__) || defined(__FreeBSD__)
             // The primary selection, as plain text — or, to an owner that
@@ -1374,6 +1550,7 @@ bool TextEdit::onEvent(Event &e) {
         (e.key == K::Left || e.key == K::Right || e.key == K::Up || e.key == K::Down))
         return false;
 #endif
+    finishComposition(true);
     switch (e.key) {
     case K::Left:
     case K::Right: {

@@ -488,6 +488,426 @@ void caseWindowMenuHasOneFullScreenEntry() {
     }
 }
 
+// ── IME & NSTextInputClient tests ──────────────────────────────────────────
+
+void caseImeDocumentQueries() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime doc queries", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        // Seed committed "abc", caret 3
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "abc",
+                .anchor = 3,
+                .caret  = 3,
+            }
+        });
+
+        CHECK([view hasMarkedText] == NO);
+        NSRange mr = [view markedRange];
+        CHECK(mr.location == NSNotFound);
+        NSRange sr = [view selectedRange];
+        CHECK(sr.location == 3 && sr.length == 0);
+
+        NSRange actual = NSMakeRange(NSNotFound, 0);
+        NSAttributedString *s = [view attributedSubstringForProposedRange:NSMakeRange(0, 3) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"abc"]);
+        CHECK(actual.location == 0 && actual.length == 3);
+
+        s = [view attributedSubstringForProposedRange:NSMakeRange(1, 1) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"b"]);
+        CHECK(actual.location == 1 && actual.length == 1);
+
+        // Out of bounds proposed range clamped to existing
+        s = [view attributedSubstringForProposedRange:NSMakeRange(2, 5) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"c"]);
+        CHECK(actual.location == 2 && actual.length == 1);
+
+        // Proposed range entirely past end returns nil
+        actual = NSMakeRange(999, 999);
+        s = [view attributedSubstringForProposedRange:NSMakeRange(5, 1) actualRange:&actual];
+        CHECK(s == nil);
+        CHECK(actual.location == NSNotFound);
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeReplacementRanges() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime replacement", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        // Seed committed "abc", caret 3
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "abc",
+                .anchor = 3,
+                .caret  = 3,
+            }
+        });
+        got.clear();
+
+        // Insert "é" replacing "b" at range {1, 1}
+        [view insertText:@"é" replacementRange:NSMakeRange(1, 1)];
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextInput);
+            CHECK(got[0].text == "é");
+            CHECK(got[0].textReplacement.has_value());
+            if (got[0].textReplacement) {
+                CHECK(got[0].textReplacement->begin == 1);
+                CHECK(got[0].textReplacement->end == 2);
+            }
+        }
+
+        // Now test empty-text replacement (deletion):
+        // Re-seed document "abc", caret 3
+        got.clear();
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "abc",
+                .anchor = 3,
+                .caret  = 3,
+            }
+        });
+
+        [view insertText:@"" replacementRange:NSMakeRange(1, 1)];
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextInput);
+            CHECK(got[0].text.empty());
+            CHECK(got[0].textReplacement.has_value());
+            if (got[0].textReplacement) {
+                CHECK(got[0].textReplacement->begin == 1);
+                CHECK(got[0].textReplacement->end == 2);
+            }
+        }
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeUnicodeRanges() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime unicode", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        // String: "A😀e\u0301Z"
+        // 'A'       : UTF-8 0..1 (len 1), UTF-16 0..1 (len 1)
+        // '😀'      : UTF-8 1..5 (len 4), UTF-16 1..3 (len 2 - surrogate pair)
+        // 'e\u0301' : UTF-8 5..8 (len 3), UTF-16 3..5 (len 2)
+        // 'Z'       : UTF-8 8..9 (len 1), UTF-16 5..6 (len 1)
+        const std::string text = "A\xF0\x9F\x98\x80" "e\xCC\x81" "Z";
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = text,
+                .anchor = uint32_t(text.size()),
+                .caret  = uint32_t(text.size()),
+            }
+        });
+
+        // Proposed range {3, 2} in UTF-16 corresponds to "e\u0301" (UTF-8 bytes 5..8)
+        NSRange actual = NSMakeRange(NSNotFound, 0);
+        NSAttributedString *s = [view attributedSubstringForProposedRange:NSMakeRange(3, 2) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"e\u0301"]);
+        CHECK(actual.location == 3 && actual.length == 2);
+
+        // Splitting a surrogate pair: surrogate is at UTF-16 1..3. Proposing {1, 1} splits it.
+        actual = NSMakeRange(123, 456);
+        s = [view attributedSubstringForProposedRange:NSMakeRange(1, 1) actualRange:&actual];
+        CHECK(s == nil);
+        CHECK(actual.location == NSNotFound);
+
+        got.clear();
+        // Replacement range targeting {3, 2} should map to UTF-8 {5, 8}
+        [view insertText:@"E" replacementRange:NSMakeRange(3, 2)];
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextInput);
+            CHECK(got[0].text == "E");
+            CHECK(got[0].textReplacement.has_value());
+            if (got[0].textReplacement) {
+                CHECK(got[0].textReplacement->begin == 5);
+                CHECK(got[0].textReplacement->end == 8);
+            }
+        }
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeMarkedReplacement() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime marked", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        // Seed committed "abc", caret 1
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "abc",
+                .anchor = 1,
+                .caret  = 1,
+            }
+        });
+        got.clear();
+
+        // setMarkedText:@"ti" replacementRange:{0, 1}
+        [view setMarkedText:@"ti" selectedRange:NSMakeRange(2, 0) replacementRange:NSMakeRange(0, 1)];
+        CHECK([view hasMarkedText] == YES);
+        NSRange mr = [view markedRange];
+        CHECK(mr.location == 0 && mr.length == 2);
+        NSRange sr = [view selectedRange];
+        CHECK(sr.location == 2 && sr.length == 0);
+
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextPreedit);
+            CHECK(got[0].text == "ti");
+            CHECK(got[0].preeditCursorBegin == 2);
+            CHECK(got[0].preeditCursorEnd == 2);
+            CHECK(got[0].textReplacement.has_value());
+            if (got[0].textReplacement) {
+                CHECK(got[0].textReplacement->begin == 0);
+                CHECK(got[0].textReplacement->end == 1);
+            }
+        }
+
+        // Substring queries over marked + committed text:
+        // effective text should be "ti" + "bc" = "tibc"
+        NSRange actual = NSMakeRange(NSNotFound, 0);
+        NSAttributedString *s = [view attributedSubstringForProposedRange:NSMakeRange(0, 2) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"ti"]);
+        CHECK(actual.location == 0 && actual.length == 2);
+
+        s = [view attributedSubstringForProposedRange:NSMakeRange(2, 2) actualRange:&actual];
+        CHECK(s != nil && [s.string isEqualToString:@"bc"]);
+        CHECK(actual.location == 2 && actual.length == 2);
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeCallbackOrdering() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime ordering", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "hello",
+                .anchor = 5,
+                .caret  = 5,
+            }
+        });
+        got.clear();
+
+        // Simulate typing a simple character 'a' (keyCode 0 on US keyboard)
+        NSEvent *keyEv = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                          location:NSZeroPoint
+                                     modifierFlags:0
+                                         timestamp:0
+                                      windowNumber:static_cast<cocoa::CocoaWindow &>(*win).window.windowNumber
+                                           context:nil
+                                        characters:@"a"
+                       charactersIgnoringModifiers:@"a"
+                                         isARepeat:NO
+                                           keyCode:0];
+        [view keyDown:keyEv];
+
+        // Should receive KeyDown followed by TextInput
+        CHECK(got.size() == 2);
+        if (got.size() >= 2) {
+            CHECK(got[0].type == EventType::KeyDown);
+            CHECK(got[0].key == Key::A);
+            CHECK(got[1].type == EventType::TextInput);
+            CHECK(got[1].text == "a");
+        }
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeEndComposition() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime end comp", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "test",
+                .anchor = 4,
+                .caret  = 4,
+            }
+        });
+
+        // 1. setMarkedText, then cancel via cancelOperation:
+        [view setMarkedText:@"foo" selectedRange:NSMakeRange(3, 0) replacementRange:NSMakeRange(4, 0)];
+        CHECK([view hasMarkedText] == YES);
+        got.clear();
+
+        // Simulate Escape key which AppKit maps to cancelOperation:
+        NSEvent *escEv = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                          location:NSZeroPoint
+                                     modifierFlags:0
+                                         timestamp:0
+                                      windowNumber:static_cast<cocoa::CocoaWindow &>(*win).window.windowNumber
+                                           context:nil
+                                        characters:@"\e"
+                       charactersIgnoringModifiers:@"\e"
+                                         isARepeat:NO
+                                           keyCode:53]; // 53 = Escape
+        [view keyDown:escEv];
+        CHECK([view hasMarkedText] == NO);
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextPreedit);
+            CHECK(got[0].compositionEnd == plat::CompositionEnd::Cancel);
+        }
+
+        // 2. setMarkedText, then commit via unmarkText
+        [view setMarkedText:@"bar" selectedRange:NSMakeRange(3, 0) replacementRange:NSMakeRange(4, 0)];
+        CHECK([view hasMarkedText] == YES);
+        got.clear();
+
+        [view unmarkText];
+        CHECK([view hasMarkedText] == NO);
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::TextPreedit);
+            CHECK(got[0].compositionEnd == plat::CompositionEnd::Commit);
+        }
+
+        // 3. Calling unmarkText when not marked is a no-op (idempotent)
+        got.clear();
+        [view unmarkText];
+        CHECK(got.empty());
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeKeyOwnership() {
+    @autoreleasepool {
+        std::string          err;
+        std::unique_ptr<App> app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        std::unique_ptr<Window> win = app->createWindow({.title = "ime key owner", .size = {160, 120}});
+        PlatView               *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        pumpRunLoop(0.05);
+
+        win->setTextInput({
+            .enabled  = true,
+            .document = plat::TextDocument{
+                .text   = "hello",
+                .anchor = 5,
+                .caret  = 5,
+            }
+        });
+
+        // Set marked text so a composition is active
+        [view setMarkedText:@"w" selectedRange:NSMakeRange(1, 0) replacementRange:NSMakeRange(5, 0)];
+        CHECK([view hasMarkedText] == YES);
+        got.clear();
+
+        // Simulate Left Arrow key (keyCode 123, NSLeftArrowFunctionKey = 0xF702)
+        NSString *leftArrowStr = [NSString stringWithFormat:@"%C", (unichar)NSLeftArrowFunctionKey];
+        NSEvent *leftEv = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                           location:NSZeroPoint
+                                      modifierFlags:0
+                                          timestamp:0
+                                       windowNumber:static_cast<cocoa::CocoaWindow &>(*win).window.windowNumber
+                                            context:nil
+                                         characters:leftArrowStr
+                        charactersIgnoringModifiers:leftArrowStr
+                                          isARepeat:NO
+                                            keyCode:123];
+        [view keyDown:leftEv];
+
+        // The unconsumed arrow key should NOT be swallowed by the IME;
+        // KeyDown(Left) must be emitted to the app so the editor can commit the composition and move.
+        CHECK(got.size() == 1);
+        if (!got.empty()) {
+            CHECK(got[0].type == EventType::KeyDown);
+            CHECK(got[0].key == Key::Left);
+        }
+
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -499,5 +919,15 @@ int main() {
     runCase("full screen leaves a system title bar alone", caseFullScreenLeavesSystemDecorationsAlone);
     runCase("the Window menu has one full-screen entry and both shortcuts",
             caseWindowMenuHasOneFullScreenEntry);
+
+    // Native IME tests
+    runCase("IME document queries and selectedRange", caseImeDocumentQueries);
+    runCase("IME replacement ranges and empty-text replacement", caseImeReplacementRanges);
+    runCase("IME multi-byte and surrogate unicode ranges", caseImeUnicodeRanges);
+    runCase("IME marked replacement over existing text", caseImeMarkedReplacement);
+    runCase("IME callback ordering: KeyDown before TextInput", caseImeCallbackOrdering);
+    runCase("IME end composition commit, cancel and idempotency", caseImeEndComposition);
+    runCase("IME key ownership and unconsumed arrow routing", caseImeKeyOwnership);
+
     return summary();
 }

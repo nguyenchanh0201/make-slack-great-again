@@ -20,6 +20,46 @@ using plat::cocoa::CocoaWindow;
 
 namespace {
 
+static bool isSurrogateLow(unichar c) {
+    return c >= 0xDC00 && c <= 0xDFFF;
+}
+static bool isSurrogateHigh(unichar c) {
+    return c >= 0xD800 && c <= 0xDBFF;
+}
+
+static NSUInteger utf16LengthOfUtf8(std::string_view u8) {
+    if (u8.empty())
+        return 0;
+    NSString *s = [[NSString alloc] initWithBytes:u8.data()
+                                           length:u8.size()
+                                         encoding:NSUTF8StringEncoding];
+    return s ? s.length : 0;
+}
+
+static NSInteger utf8OffsetFromUtf16(NSString *s, NSUInteger u16) {
+    if (!s || u16 == 0)
+        return 0;
+    if (u16 >= s.length)
+        return (NSInteger)[s lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (isSurrogateLow([s characterAtIndex:u16]) && isSurrogateHigh([s characterAtIndex:u16 - 1]))
+        return -1; // splits surrogate pair
+    NSString *prefix = [s substringToIndex:u16];
+    return (NSInteger)[prefix lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+}
+
+static NSUInteger utf16OffsetFromUtf8(std::string_view u8, uint32_t byteOffset) {
+    if (byteOffset == 0)
+        return 0;
+    if (byteOffset >= u8.size())
+        return utf16LengthOfUtf8(u8);
+    if ((uint8_t(u8[byteOffset]) & 0xC0) == 0x80)
+        return NSNotFound; // splits UTF-8
+    NSString *prefix = [[NSString alloc] initWithBytes:u8.data()
+                                                length:byteOffset
+                                              encoding:NSUTF8StringEncoding];
+    return prefix ? prefix.length : NSNotFound;
+}
+
 // UTF-8 byte length of the first `utf16` code units of s — preedit cursor
 // offsets are bytes in plat but NSRange counts UTF-16 units.
 int utf8Offset(NSString *s, NSUInteger utf16) {
@@ -71,12 +111,20 @@ constexpr NSEventModifierFlags kDevLCtrl = 0x0001, kDevLShift = 0x0002, kDevRShi
 
 @implementation PlatView {
     NSTrackingArea          *_tracking;
-    NSMutableString         *_marked; // current preedit, nil when none
-    NSRange                  _markedSel;
+    bool                     _hasDoc;
+    std::string              _docText;
+    uint32_t                 _docAnchor;
+    uint32_t                 _docCaret;
+    bool                     _hasMarked;
+    std::string              _markedText;
+    plat::TextRange          _markedRepl;
+    plat::TextRange          _markedSel;
     // State of the key event being run through interpretKeyEvents:
     bool                     _inKeyDown;
     bool                     _imeTouched;
-    std::vector<std::string> _pendingText;
+    bool                     _commandCalled;
+    SEL                      _commandSelector;
+    std::vector<plat::Event> _pendingEvents;
     bool                     _keyDownSent[128];
     // The offered MIME types of the drag over us, kept for the moves that
     // follow: valid while the drag (sequence number) and the pasteboard
@@ -402,22 +450,33 @@ constexpr NSEventModifierFlags kDevLCtrl = 0x0001, kDevLShift = 0x0002, kDevRShi
     // so the order stays KeyDown → TextInput. A key the IME is composing with
     // (dead key, Kana, Pinyin, the Enter that commits a candidate) is the
     // IME's, not the app's: it gets no KeyDown, or Enter would also send.
-    const bool hadMarked = _marked != nil;
-    _inKeyDown           = true;
-    _imeTouched          = false;
-    _pendingText.clear();
+    const bool hadMarked = _hasMarked;
+    _inKeyDown       = true;
+    _imeTouched      = false;
+    _commandCalled   = false;
+    _commandSelector = nil;
+    _pendingEvents.clear();
     [self interpretKeyEvents:@[ ev ]];
     _inKeyDown = false;
-    if (!hadMarked && !_imeTouched && _marked == nil) {
+    if (_commandCalled && _commandSelector == @selector(cancelOperation:)) {
+        if (_hasMarked) {
+            Event cancelEvent{.type = EventType::TextPreedit, .compositionEnd = plat::CompositionEnd::Cancel};
+            _hasMarked = false;
+            _markedText.clear();
+            [self.inputContext discardMarkedText];
+            if (_owner)
+                _owner->emit(cancelEvent);
+        }
+    } else if (!_imeTouched && (!hadMarked || _pendingEvents.empty())) {
         if (vk < 128)
             _keyDownSent[vk] = true;
         _owner->emit([self keyEvent:ev type:EventType::KeyDown]);
     }
-    auto pending = std::move(_pendingText);
-    _pendingText.clear();
-    for (auto &t : pending)
+    auto pending = std::move(_pendingEvents);
+    _pendingEvents.clear();
+    for (auto &pe : pending)
         if (_owner)
-            _owner->emit({.type = EventType::TextInput, .text = std::move(t)});
+            _owner->emit(pe);
 }
 
 - (void)keyUp:(NSEvent *)ev {
@@ -497,88 +556,374 @@ constexpr NSEventModifierFlags kDevLCtrl = 0x0001, kDevLShift = 0x0002, kDevRShi
 
 // ── NSTextInputClient ───────────────────────────────────────────────────────
 
-- (void)emitPreedit {
-    if (!_owner)
+- (void)updateDocumentState:(const plat::TextInputState &)s {
+    if (!s.enabled || !s.document) {
+        _hasDoc    = false;
+        _hasMarked = false;
+        _docText.clear();
+        _markedText.clear();
         return;
-    Event e{.type = EventType::TextPreedit};
-    if (_marked) {
-        e.text = _marked.UTF8String;
-        if (_markedSel.location != NSNotFound) {
-            e.preeditCursorBegin = utf8Offset(_marked, _markedSel.location);
-            e.preeditCursorEnd   = utf8Offset(_marked, NSMaxRange(_markedSel));
-        }
     }
-    _owner->emit(e);
+    _hasDoc    = true;
+    _docText   = s.document->text;
+    _docAnchor = s.document->anchor;
+    _docCaret  = s.document->caret;
+    if (s.document->composition) {
+        _hasMarked  = true;
+        _markedRepl = s.document->composition->replacement;
+        _markedText = s.document->composition->text;
+        _markedSel  = s.document->composition->selection;
+    } else {
+        _hasMarked  = false;
+        _markedText.clear();
+        _markedRepl = {_docCaret, _docCaret};
+        _markedSel  = {0, 0};
+    }
+}
+
+struct EffectiveState {
+    NSString   *effStr;
+    NSRange     markedRange;
+    NSRange     selectedRange;
+    NSUInteger  prefixU16Len;
+    NSUInteger  markedU16Len;
+    uint32_t    cReplBegin;
+    uint32_t    cReplEnd;
+};
+
+- (EffectiveState)currentEffectiveState {
+    EffectiveState st{};
+    st.markedRange   = NSMakeRange(NSNotFound, 0);
+    st.selectedRange = NSMakeRange(0, 0);
+    if (!_hasDoc) {
+        if (_hasMarked && !_markedText.empty()) {
+            st.effStr       = [NSString stringWithUTF8String:_markedText.c_str()];
+            st.markedRange  = NSMakeRange(0, st.effStr ? st.effStr.length : 0);
+            st.markedU16Len = st.markedRange.length;
+        }
+        return st;
+    }
+    if (_hasMarked) {
+        st.cReplBegin = _markedRepl.begin;
+        st.cReplEnd   = _markedRepl.end;
+        if (st.cReplBegin > _docText.size())
+            st.cReplBegin = uint32_t(_docText.size());
+        if (st.cReplEnd < st.cReplBegin || st.cReplEnd > _docText.size())
+            st.cReplEnd = uint32_t(_docText.size());
+        std::string prefix = _docText.substr(0, st.cReplBegin);
+        std::string suffix = _docText.substr(st.cReplEnd);
+        std::string total  = prefix + _markedText + suffix;
+        st.effStr          = [NSString stringWithUTF8String:total.c_str()];
+        if (!st.effStr)
+            st.effStr = @"";
+        st.prefixU16Len = utf16LengthOfUtf8(prefix);
+        st.markedU16Len = utf16LengthOfUtf8(_markedText);
+        st.markedRange  = NSMakeRange(st.prefixU16Len, st.markedU16Len);
+        NSUInteger selStart = utf16OffsetFromUtf8(_markedText, _markedSel.begin);
+        if (selStart == NSNotFound)
+            selStart = st.markedU16Len;
+        NSUInteger selEnd = utf16OffsetFromUtf8(_markedText, _markedSel.end);
+        if (selEnd == NSNotFound || selEnd < selStart)
+            selEnd = selStart;
+        st.selectedRange = NSMakeRange(st.prefixU16Len + selStart, selEnd - selStart);
+    } else {
+        st.cReplBegin = _docCaret;
+        st.cReplEnd   = _docCaret;
+        st.effStr     = [NSString stringWithUTF8String:_docText.c_str()];
+        if (!st.effStr)
+            st.effStr = @"";
+        uint32_t a = std::min(_docAnchor, _docCaret);
+        uint32_t b = std::max(_docAnchor, _docCaret);
+        NSUInteger u16A = utf16OffsetFromUtf8(_docText, a);
+        NSUInteger u16B = utf16OffsetFromUtf8(_docText, b);
+        if (u16A != NSNotFound && u16B != NSNotFound)
+            st.selectedRange = NSMakeRange(u16A, u16B - u16A);
+        else
+            st.selectedRange = NSMakeRange(0, 0);
+    }
+    return st;
 }
 
 - (void)insertText:(id)string replacementRange:(NSRange)replacementRange {
-    if (!_owner)
+    NSString *rawStr = plainString(string);
+    std::string text = filteredText(rawStr);
+
+    if (!_hasDoc) {
+        _hasMarked = false;
+        _markedText.clear();
+        if (text.empty() && replacementRange.location == NSNotFound)
+            return;
+        Event e{.type = EventType::TextInput, .text = text};
+        if (_inKeyDown)
+            _pendingEvents.push_back(std::move(e));
+        else if (_owner)
+            _owner->emit(e);
         return;
-    if (_marked) { // a commit ends the composition
-        _marked = nil;
-        [self emitPreedit];
     }
-    std::string t = filteredText(plainString(string));
-    if (t.empty())
-        return;
+
+    EffectiveState st = [self currentEffectiveState];
+    NSRange targetRange = replacementRange;
+    if (targetRange.location == NSNotFound)
+        targetRange = _hasMarked ? st.markedRange : st.selectedRange;
+
+    const NSUInteger rLoc = targetRange.location;
+    const NSUInteger rLen = targetRange.length;
+    const NSUInteger rEnd = rLoc + rLen;
+
+    uint32_t committedBegin = 0;
+    uint32_t committedEnd   = 0;
+    std::string finalCommit;
+
+    if (_hasMarked && rLoc >= st.prefixU16Len && rEnd <= st.prefixU16Len + st.markedU16Len) {
+        committedBegin = st.cReplBegin;
+        committedEnd   = st.cReplEnd;
+        NSString *mStr = [NSString stringWithUTF8String:_markedText.c_str()];
+        NSInteger p0 = utf8OffsetFromUtf16(mStr, rLoc - st.prefixU16Len);
+        NSInteger p1 = utf8OffsetFromUtf16(mStr, rEnd - st.prefixU16Len);
+        if (p0 < 0 || p1 < 0)
+            return;
+        finalCommit = _markedText.substr(0, p0) + text + _markedText.substr(p1);
+    } else if (!_hasMarked) {
+        NSInteger c0 = utf8OffsetFromUtf16(st.effStr, rLoc);
+        NSInteger c1 = utf8OffsetFromUtf16(st.effStr, rEnd);
+        if (c0 < 0 || c1 < 0)
+            return;
+        committedBegin = uint32_t(c0);
+        committedEnd   = uint32_t(c1);
+        finalCommit    = text;
+    } else {
+        NSString *preStr = [_docText.empty() ? @"" : [NSString stringWithUTF8String:_docText.substr(0, st.cReplBegin).c_str()] copy];
+        NSString *sufStr = [_docText.empty() ? @"" : [NSString stringWithUTF8String:_docText.substr(st.cReplEnd).c_str()] copy];
+        NSString *mStr   = [NSString stringWithUTF8String:_markedText.c_str()];
+
+        std::string untouchedPre;
+        if (rLoc < st.prefixU16Len) {
+            NSInteger c0 = utf8OffsetFromUtf16(preStr, rLoc);
+            if (c0 < 0) return;
+            committedBegin = uint32_t(c0);
+        } else {
+            committedBegin = st.cReplBegin;
+            NSInteger p0 = utf8OffsetFromUtf16(mStr, rLoc - st.prefixU16Len);
+            if (p0 < 0) return;
+            untouchedPre = _markedText.substr(0, p0);
+        }
+
+        std::string untouchedSuf;
+        if (rEnd > st.prefixU16Len + st.markedU16Len) {
+            NSInteger c1 = utf8OffsetFromUtf16(sufStr, rEnd - (st.prefixU16Len + st.markedU16Len));
+            if (c1 < 0) return;
+            committedEnd = st.cReplEnd + uint32_t(c1);
+        } else {
+            committedEnd = st.cReplEnd;
+            NSInteger p1 = utf8OffsetFromUtf16(mStr, rEnd - st.prefixU16Len);
+            if (p1 < 0) return;
+            untouchedSuf = _markedText.substr(p1);
+        }
+        finalCommit = untouchedPre + text + untouchedSuf;
+    }
+
+    if (committedBegin <= _docText.size() && committedEnd <= _docText.size() && committedBegin <= committedEnd) {
+        _docText = _docText.substr(0, committedBegin) + finalCommit + _docText.substr(committedEnd);
+        _docCaret = _docAnchor = committedBegin + uint32_t(finalCommit.size());
+    }
+    _hasMarked = false;
+    _markedText.clear();
+
+    Event e{.type = EventType::TextInput, .text = finalCommit};
+    e.textReplacement = plat::TextRange{committedBegin, committedEnd};
     if (_inKeyDown)
-        _pendingText.push_back(std::move(t));
-    else // character palette, dictation, …
-        _owner->emit({.type = EventType::TextInput, .text = std::move(t)});
+        _pendingEvents.push_back(std::move(e));
+    else if (_owner)
+        _owner->emit(e);
 }
 
 - (void)setMarkedText:(id)string
         selectedRange:(NSRange)selectedRange
      replacementRange:(NSRange)replacementRange {
-    NSString *s = plainString(string);
     _imeTouched = true;
-    _marked     = s.length ? [s mutableCopy] : nil;
-    _markedSel  = selectedRange;
-    [self emitPreedit];
+    NSString *rawStr = plainString(string);
+    std::string newText = rawStr.length ? std::string(rawStr.UTF8String) : std::string();
+
+    if (!_hasDoc) {
+        _hasMarked  = true;
+        _markedText = newText;
+        Event e{.type = EventType::TextPreedit, .text = newText};
+        if (selectedRange.location != NSNotFound) {
+            e.preeditCursorBegin = utf8Offset(rawStr, selectedRange.location);
+            e.preeditCursorEnd   = utf8Offset(rawStr, NSMaxRange(selectedRange));
+        }
+        if (_inKeyDown)
+            _pendingEvents.push_back(std::move(e));
+        else if (_owner)
+            _owner->emit(e);
+        return;
+    }
+
+    EffectiveState st = [self currentEffectiveState];
+    NSRange targetRange = replacementRange;
+    if (targetRange.location == NSNotFound)
+        targetRange = _hasMarked ? st.markedRange : st.selectedRange;
+
+    const NSUInteger rLoc = targetRange.location;
+    const NSUInteger rLen = targetRange.length;
+    const NSUInteger rEnd = rLoc + rLen;
+
+    uint32_t committedBegin = 0;
+    uint32_t committedEnd   = 0;
+    std::string composedPreedit;
+
+    if (_hasMarked && rLoc >= st.prefixU16Len && rEnd <= st.prefixU16Len + st.markedU16Len) {
+        committedBegin = st.cReplBegin;
+        committedEnd   = st.cReplEnd;
+        NSString *mStr = [NSString stringWithUTF8String:_markedText.c_str()];
+        NSInteger p0 = utf8OffsetFromUtf16(mStr, rLoc - st.prefixU16Len);
+        NSInteger p1 = utf8OffsetFromUtf16(mStr, rEnd - st.prefixU16Len);
+        if (p0 < 0 || p1 < 0)
+            return;
+        composedPreedit = _markedText.substr(0, p0) + newText + _markedText.substr(p1);
+    } else if (!_hasMarked) {
+        NSInteger c0 = utf8OffsetFromUtf16(st.effStr, rLoc);
+        NSInteger c1 = utf8OffsetFromUtf16(st.effStr, rEnd);
+        if (c0 < 0 || c1 < 0)
+            return;
+        committedBegin = uint32_t(c0);
+        committedEnd   = uint32_t(c1);
+        composedPreedit = newText;
+    } else {
+        NSString *preStr = [_docText.empty() ? @"" : [NSString stringWithUTF8String:_docText.substr(0, st.cReplBegin).c_str()] copy];
+        NSString *sufStr = [_docText.empty() ? @"" : [NSString stringWithUTF8String:_docText.substr(st.cReplEnd).c_str()] copy];
+        NSString *mStr   = [NSString stringWithUTF8String:_markedText.c_str()];
+
+        std::string untouchedPre;
+        if (rLoc < st.prefixU16Len) {
+            NSInteger c0 = utf8OffsetFromUtf16(preStr, rLoc);
+            if (c0 < 0) return;
+            committedBegin = uint32_t(c0);
+        } else {
+            committedBegin = st.cReplBegin;
+            NSInteger p0 = utf8OffsetFromUtf16(mStr, rLoc - st.prefixU16Len);
+            if (p0 < 0) return;
+            untouchedPre = _markedText.substr(0, p0);
+        }
+
+        std::string untouchedSuf;
+        if (rEnd > st.prefixU16Len + st.markedU16Len) {
+            NSInteger c1 = utf8OffsetFromUtf16(sufStr, rEnd - (st.prefixU16Len + st.markedU16Len));
+            if (c1 < 0) return;
+            committedEnd = st.cReplEnd + uint32_t(c1);
+        } else {
+            committedEnd = st.cReplEnd;
+            NSInteger p1 = utf8OffsetFromUtf16(mStr, rEnd - st.prefixU16Len);
+            if (p1 < 0) return;
+            untouchedSuf = _markedText.substr(p1);
+        }
+        composedPreedit = untouchedPre + newText + untouchedSuf;
+    }
+
+    _hasMarked   = true;
+    _markedText  = composedPreedit;
+    _markedRepl  = {committedBegin, committedEnd};
+
+    uint32_t curBegin = 0, curEnd = 0;
+    if (selectedRange.location != NSNotFound) {
+        NSInteger s0 = utf8OffsetFromUtf16(rawStr, selectedRange.location);
+        NSInteger s1 = utf8OffsetFromUtf16(rawStr, NSMaxRange(selectedRange));
+        if (s0 >= 0) curBegin = uint32_t(s0);
+        if (s1 >= 0) curEnd   = uint32_t(s1);
+    } else {
+        curBegin = curEnd = uint32_t(_markedText.size());
+    }
+    _markedSel = {curBegin, curEnd};
+
+    Event e{.type = EventType::TextPreedit, .text = composedPreedit};
+    e.textReplacement    = _markedRepl;
+    e.preeditCursorBegin = int(curBegin);
+    e.preeditCursorEnd   = int(curEnd);
+    if (_inKeyDown)
+        _pendingEvents.push_back(std::move(e));
+    else if (_owner)
+        _owner->emit(e);
 }
 
 - (void)unmarkText {
-    // The input context tells us the composition is over; whatever it wants
-    // committed arrives through insertText:, so only the preedit ends here.
-    if (!_marked)
+    if (!_hasMarked)
         return;
-    _marked = nil;
-    [self emitPreedit];
+    _imeTouched = true;
+    _hasMarked  = false;
+    Event e{.type = EventType::TextPreedit, .compositionEnd = plat::CompositionEnd::Commit};
+    _markedText.clear();
+    if (_inKeyDown)
+        _pendingEvents.push_back(std::move(e));
+    else if (_owner)
+        _owner->emit(e);
 }
 
 - (void)discardComposition {
-    if (!_marked)
+    _hasDoc = false;
+    _docText.clear();
+    _pendingEvents.clear();
+    if (!_hasMarked)
         return;
+    _hasMarked = false;
+    _markedText.clear();
     [self.inputContext discardMarkedText];
-    _marked = nil;
-    [self emitPreedit];
+    Event e{.type = EventType::TextPreedit, .compositionEnd = plat::CompositionEnd::Cancel};
+    if (_owner)
+        _owner->emit(e);
 }
 
 - (BOOL)hasMarkedText {
-    return _marked != nil;
+    return _hasMarked && !_markedText.empty();
 }
+
 - (NSRange)markedRange {
-    return _marked ? NSMakeRange(0, _marked.length) : NSMakeRange(NSNotFound, 0);
+    EffectiveState st = [self currentEffectiveState];
+    return st.markedRange;
 }
-// plat does not expose the document to the IME (no reconversion); the
-// selection is an empty range at the end of the composition.
+
 - (NSRange)selectedRange {
-    return _marked ? _markedSel : NSMakeRange(0, 0);
+    EffectiveState st = [self currentEffectiveState];
+    return st.selectedRange;
 }
+
 - (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText {
     return @[];
 }
+
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range
                                                 actualRange:(NSRangePointer)actualRange {
-    return nil;
+    if (actualRange)
+        *actualRange = NSMakeRange(NSNotFound, 0);
+    EffectiveState st = [self currentEffectiveState];
+    if (!st.effStr || st.effStr.length == 0)
+        return nil;
+    if (range.location >= st.effStr.length)
+        return nil;
+    NSRange actual = NSIntersectionRange(range, NSMakeRange(0, st.effStr.length));
+    if (actual.length == 0)
+        return nil;
+    if (actual.location > 0 && actual.location < st.effStr.length &&
+        isSurrogateLow([st.effStr characterAtIndex:actual.location]))
+        return nil;
+    if (NSMaxRange(actual) > 0 && NSMaxRange(actual) < st.effStr.length &&
+        isSurrogateLow([st.effStr characterAtIndex:NSMaxRange(actual)]))
+        return nil;
+    if (actualRange)
+        *actualRange = actual;
+    return [[NSAttributedString alloc] initWithString:[st.effStr substringWithRange:actual]];
 }
+
 - (NSUInteger)characterIndexForPoint:(NSPoint)point {
     return NSNotFound;
 }
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
+    if (actualRange)
+        *actualRange = NSMakeRange(NSNotFound, 0);
     if (!_owner || !self.window)
         return NSZeroRect;
+    if (actualRange)
+        *actualRange = [self selectedRange];
     const plat::Rect c        = _owner->textInput.caret;
     // The caret is logical px relative to the window = points in our flipped
     // view; the IME wants screen coordinates (bottom-left origin).
@@ -587,10 +932,9 @@ constexpr NSEventModifierFlags kDevLCtrl = 0x0001, kDevLShift = 0x0002, kDevRShi
     return [self.window convertRectToScreen:inWindow];
 }
 
-// Keys that map to editing commands (insertNewline:, deleteBackward:, …)
-// already reached the app as KeyDown; swallowing the selector also stops
-// NSResponder's default from beeping.
 - (void)doCommandBySelector:(SEL)selector {
+    _commandCalled   = true;
+    _commandSelector = selector;
 }
 
 // ── drag and drop: target ───────────────────────────────────────────────────
@@ -1268,8 +1612,11 @@ void CocoaWindow::setTextInput(const TextInputState &s) {
     textInput             = s;
     if (!s.enabled)
         [view discardComposition];
-    else if (caretMoved)
-        [view.inputContext invalidateCharacterCoordinates]; // move the candidate window
+    else {
+        [view updateDocumentState:s];
+        if (caretMoved)
+            [view.inputContext invalidateCharacterCoordinates]; // move the candidate window
+    }
 }
 
 // ── painting ────────────────────────────────────────────────────────────────

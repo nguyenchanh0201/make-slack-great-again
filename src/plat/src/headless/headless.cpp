@@ -778,6 +778,9 @@ Cursor headlessCursor(Window &w) {
 HitArea headlessLastHit(Window &w) {
     return static_cast<HeadlessWindow &>(w).lastHit;
 }
+const TextInputState &headlessTextInput(Window &w) {
+    return static_cast<HeadlessWindow &>(w).textInput;
+}
 } // namespace testing_internal
 
 } // namespace plat
