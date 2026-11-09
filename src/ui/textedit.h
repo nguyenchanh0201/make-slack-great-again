@@ -32,6 +32,8 @@ public:
 
     // ── Content ─────────────────────────────────────────────────────────────
     const std::string &text() const { return _text; } // plain UTF-8, '\n' between lines
+    std::string        composedText() const; // visible text including the IME's pending replacement
+    void               commitComposition() { finishComposition(true); }
     bool               empty() const { return _text.empty(); }
     void               setText(std::string_view plain); // clears formats and undo history
     void               clear() { setText({}); }
@@ -79,6 +81,7 @@ public:
     // Up in an empty composer to edit the last message, …).
     std::function<bool(const Event &)> onKey;
     std::function<void()>              onChange;          // text or formats changed
+    std::function<void()> onPreeditChange; // visible composition changed, not a committed edit
     std::function<void()>              onSelectionChange; // caret/selection moved
     std::function<void(bool focused)>  onFocusChange;
     // Before a paste inserts text: the clipboard's MIME types (plat's
@@ -153,12 +156,13 @@ private:
     };
 
     void replace(
-        uint32_t         from,
-        uint32_t         to,
-        std::string_view ins,
-        const uint16_t  *fmt,
-        uint16_t         fillFmt,
-        EditKind         kind
+        uint32_t                       from,
+        uint32_t                       to,
+        std::string_view               ins,
+        const uint16_t                *fmt,
+        uint16_t                       fillFmt,
+        EditKind                       kind,
+        std::optional<plat::TextRange> selection = std::nullopt
     );
     void     apply(const Edit &e, bool reverse);
     void     deleteSelection(EditKind kind = EditKind::Other);

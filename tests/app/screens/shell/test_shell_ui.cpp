@@ -1222,6 +1222,112 @@ TEST("composer: the toolbar types the formatting markers; the send button lights
     CHECK(c.sendButton()->tint() == ui::C::DropArrow);
 }
 
+TEST("composer: active IME text enables explicit send and is included exactly once") {
+    Harness h;
+    auto   &c = h.composer();
+    auto   &e = c.edit();
+    e.focus();
+    const ConvRef design = h.conv("C0DESIGN");
+    const size_t  before = h.store.conversation(design).messages.size();
+    plat::Event   raw{
+        .type               = plat::EventType::TextPreedit,
+        .text               = "cccc",
+        .preeditCursorBegin = 4,
+        .preeditCursorEnd   = 4
+    };
+    raw.textReplacement = plat::TextRange{0, 0};
+    ui::Event event{ui::EventType::TextPreedit};
+    event.raw = &raw;
+    e.onEvent(event);
+    pump();
+    CHECK_STR(e.text(), "");
+    CHECK(c.sendButton()->tint() == ui::C::AccentText);
+    CHECK(h.store.conversation(design).messages.size() == before);
+    CHECK(c.send());
+    CHECK(h.store.conversation(design).messages.size() == before + 1);
+    CHECK_STR(h.store.conversation(design).messages.back().text, "cccc");
+    CHECK(e.empty());
+    CHECK(!e.composition());
+    CHECK(c.sendButton()->tint() == ui::C::DropArrow);
+}
+
+TEST("composer: scheduling finalizes pending IME text before opening the picker") {
+    Harness h;
+    auto   &c = h.composer();
+    auto   &e = c.edit();
+    e.focus();
+    plat::Event raw{.type = plat::EventType::TextPreedit, .text = "chào"};
+    raw.textReplacement = plat::TextRange{0, 0};
+    ui::Event event{ui::EventType::TextPreedit};
+    event.raw = &raw;
+    e.onEvent(event);
+    c.openSchedule();
+    pump();
+    CHECK_STR(e.text(), "chào");
+    CHECK(!e.composition());
+    REQUIRE(h.win->topPopup() != nullptr);
+    auto *schedule = static_cast<ui::Clickable *>(findView(h.win->topPopup(), [](ui::View *v) {
+        return v->accessibleName() == "Schedule";
+    }));
+    REQUIRE(schedule != nullptr);
+    schedule->activate();
+    pump();
+    CHECK_STR(h.backend.scheduledText, "chào");
+}
+
+TEST("composer: switching conversation preserves pending IME text in its original draft") {
+    Harness h;
+    auto   &c = h.composer();
+    c.edit().focus();
+    plat::Event raw{.type = plat::EventType::TextPreedit, .text = "chào"};
+    raw.textReplacement = plat::TextRange{0, 0};
+    ui::Event event{ui::EventType::TextPreedit};
+    event.raw = &raw;
+    c.edit().onEvent(event);
+    c.setTarget(h.conv("D0JONAS"), 0);
+    CHECK(c.edit().empty());
+    c.setTarget(h.conv("C0DESIGN"), 0);
+    CHECK_STR(c.edit().text(), "chào");
+    CHECK(!c.edit().composition());
+}
+
+TEST("composer: editing a sent message preserves an IME draft set aside") {
+    Harness h;
+    auto   &c = h.composer();
+    c.edit().focus();
+    h.backend.send(h.conv("C0DESIGN"), "sent", 0, nullptr);
+    pump();
+    const Ts    ts = h.store.conversation(h.conv("C0DESIGN")).messages.back().ts;
+    plat::Event raw{.type = plat::EventType::TextPreedit, .text = "chào"};
+    raw.textReplacement = plat::TextRange{0, 0};
+    ui::Event event{ui::EventType::TextPreedit};
+    event.raw = &raw;
+    c.edit().onEvent(event);
+    c.beginEdit(ts);
+    c.endEdit();
+    CHECK_STR(c.edit().text(), "chào");
+}
+
+TEST("composer: cancelling IME replacement restores send affordance without changing the draft") {
+    Harness h;
+    auto   &c = h.composer();
+    auto   &e = c.edit();
+    e.focus();
+    e.setText("draft");
+    plat::Event raw{.type = plat::EventType::TextPreedit, .text = " "};
+    raw.textReplacement = plat::TextRange{0, 5};
+    ui::Event event{ui::EventType::TextPreedit};
+    event.raw = &raw;
+    e.onEvent(event);
+    pump();
+    CHECK(c.sendButton()->tint() == ui::C::DropArrow);
+    raw.compositionEnd = plat::CompositionEnd::Cancel;
+    e.onEvent(event);
+    pump();
+    CHECK_STR(e.text(), "draft");
+    CHECK(c.sendButton()->tint() == ui::C::AccentText);
+}
+
 TEST("composer: the window's is disabled until a conversation opens; an embedded one is not") {
     Harness h(false);
     CHECK(!h.composer().enabled());

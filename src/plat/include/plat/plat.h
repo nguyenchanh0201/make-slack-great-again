@@ -388,6 +388,7 @@ struct Event {
     std::string text; // TextInput / TextPreedit / Drop(text) — UTF-8
     int         preeditCursorBegin = -1, preeditCursorEnd = -1; // byte offsets, -1 = hidden
     std::optional<TextRange> textReplacement;
+    std::optional<TextRange> textSelection; // TextInput: UTF-8 selection within inserted text
     CompositionEnd compositionEnd = CompositionEnd::None;
     std::vector<std::string> uris; // Drop: file:// URIs (local files) or other URIs
 
