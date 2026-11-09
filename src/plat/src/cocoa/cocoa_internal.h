@@ -45,6 +45,7 @@ constexpr CFTimeInterval kFrameFallback = 0.1;
 @interface PlatView : NSView <NSTextInputClient, NSDraggingSource>
 @property(nonatomic, assign) plat::cocoa::CocoaWindow *owner;
 - (void)discardComposition; // text input turned off mid-composition
+- (void)updateDocumentState:(const plat::TextInputState &)s;
 - (void)button:(plat::Button)b down:(bool)down event:(NSEvent *)ev; // press/release handler
 @end
 

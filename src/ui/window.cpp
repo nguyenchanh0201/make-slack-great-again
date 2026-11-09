@@ -723,19 +723,25 @@ bool Window::startDrag(const plat::DragDesc &d) {
     return app()->platform().startDrag(*_native, d);
 }
 
-void Window::setTextInput(bool enabled, RectF caret) {
-    if (enabled == _textInput && sameRect(caret, _textCaret))
+void Window::setTextInput(
+    bool                              enabled,
+    RectF                             caret,
+    std::optional<plat::TextDocument> document
+) {
+    if (enabled == _textInput && sameRect(caret, _textCaret) && document == _textDoc)
         return;
     _textInput = enabled;
     _textCaret = caret;
+    _textDoc   = document;
     plat::TextInputState s;
-    s.enabled = enabled;
-    s.caret   = {
+    s.enabled  = enabled;
+    s.caret    = {
         int(std::floor(caret.x)),
         int(std::floor(caret.y)),
         std::max(1, int(std::ceil(caret.w))),
         std::max(1, int(std::ceil(caret.h)))
     };
+    s.document = std::move(document);
     _native->setTextInput(s);
 }
 

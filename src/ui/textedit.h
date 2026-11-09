@@ -125,7 +125,8 @@ public:
     // paste() without onPasteMedia
     void pasteText(bool plainText = false, plat::Selection sel = plat::Selection::Clipboard);
 
-    const std::string &preedit() const { return _preedit; }
+    const std::string                          &preedit() const { return _preedit; }
+    const std::optional<plat::TextComposition> &composition() const { return _composition; }
     RectF              caretRect() const; // local coordinates
     // The caret is on the first (top) / last visual line: Up / Down can't
     // move it to another line (the composer's prompt history steps from there).
@@ -166,6 +167,7 @@ private:
     void     selectionChanged();
     void     ensureCaretVisible();
     void     updateIme();
+    void     finishComposition(bool commit);
     void     startBlink();
     void     stopBlink();
     void     setPrimarySelection();
@@ -183,6 +185,7 @@ private:
     void scanParas(uint32_t from, uint32_t end, bool last, std::vector<Para> &out) const;
     void editParas(uint32_t pos, size_t removed, size_t inserted);
     void dropParaAt(uint32_t modelPos);
+    void dropParasInRange(uint32_t from, uint32_t to);
     void dropLayouts();
     std::unique_ptr<text::Layout> buildPara(const Para &p, float w) const;
     bool                          holdsPreedit(const Para &p) const;
@@ -232,7 +235,8 @@ private:
     std::vector<std::string>      _links; // link index - 1
     std::vector<Range>            _squiggles;
     std::vector<Wave>             _waves; // placeWaves(), while _wavesValid
-    std::string                   _preedit, _placeholder;
+    std::string                          _preedit, _placeholder;
+    std::optional<plat::TextComposition> _composition;
     std::vector<Edit>             _undo, _redo;
     std::vector<Para>             _paras;
     std::unique_ptr<text::Layout> _placeholderLayout;

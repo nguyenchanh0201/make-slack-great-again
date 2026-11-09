@@ -23,6 +23,34 @@ struct EditWin : Win {
 #else
     const uint32_t word = plat::ModCtrl;
 #endif
+
+    void textWithReplacement(std::string s, plat::TextRange r) {
+        plat::Event e;
+        e.type            = plat::EventType::TextInput;
+        e.window          = &native();
+        e.text            = std::move(s);
+        e.textReplacement = r;
+        w->handle(e);
+        frame(1);
+    }
+    void preeditWithReplacement(std::string s, plat::TextRange r, int cursor = -1) {
+        plat::Event e;
+        e.type                = plat::EventType::TextPreedit;
+        e.window              = &native();
+        e.text                = std::move(s);
+        e.textReplacement     = r;
+        e.preeditCursorBegin  = e.preeditCursorEnd = cursor;
+        w->handle(e);
+        frame(1);
+    }
+    void preeditEnd(plat::CompositionEnd end) {
+        plat::Event e;
+        e.type           = plat::EventType::TextPreedit;
+        e.window         = &native();
+        e.compositionEnd = end;
+        w->handle(e);
+        frame(1);
+    }
 };
 
 std::string runsDesc(const ui::TextEdit &e) {
@@ -494,4 +522,209 @@ TEST("html: the tag scanner and attribute reader, forgiving and strict") {
     CHECK(depth == 0); // never below
     ui::rich::readTag("<b>", 0, &t);
     CHECK_FALSE(ui::rich::skippedTag(t, &depth, false));
+}
+
+TEST("textedit: IME replacement after navigation") {
+    EditWin t;
+    t.type("abc");
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK(t.edit->caret() == 3);
+
+    // Replace byte 1..2 ('b') with 'é' (2 bytes in UTF-8)
+    t.textWithReplacement("é", {1, 2});
+    CHECK_STR(t.edit->text(), "aéc");
+    CHECK(t.edit->caret() == 3); // 1 + 2 = 3
+
+    // Undo restores "abc"
+    CHECK(t.edit->undo());
+    CHECK_STR(t.edit->text(), "abc");
+
+    // Redo restores "aéc"
+    CHECK(t.edit->redo());
+    CHECK_STR(t.edit->text(), "aéc");
+}
+
+TEST("textedit: IME empty replacement deletes") {
+    EditWin t;
+    t.type("abc");
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK(t.edit->caret() == 3);
+
+    // Empty text with replacement {1, 2} deletes 'b'
+    t.textWithReplacement("", {1, 2});
+    CHECK_STR(t.edit->text(), "ac");
+    CHECK(t.edit->caret() == 1);
+}
+
+TEST("textedit: IME composition replacement is transactional") {
+    EditWin t;
+    t.type("abc");
+
+    // Start preedit "é" over {1, 2}
+    t.preeditWithReplacement("é", {1, 2});
+    CHECK_STR(t.edit->text(), "abc"); // committed text unchanged
+    REQUIRE(t.edit->composition().has_value());
+    CHECK_STR(t.edit->composition()->text, "é");
+    CHECK(t.edit->composition()->replacement.begin == 1);
+    CHECK(t.edit->composition()->replacement.end == 2);
+
+    // Update to "ê" without accumulating text
+    t.preeditWithReplacement("ê", {1, 2});
+    CHECK_STR(t.edit->text(), "abc");
+    REQUIRE(t.edit->composition().has_value());
+    CHECK_STR(t.edit->composition()->text, "ê");
+
+    // Commit once to "aêc"
+    t.preeditEnd(plat::CompositionEnd::Commit);
+    CHECK_STR(t.edit->text(), "aêc");
+    CHECK(t.edit->caret() == 3);
+    CHECK(!t.edit->composition().has_value());
+
+    // Test cancellation restores original selection/text without undo entry
+    t.edit->setText("abc");
+    t.preeditWithReplacement("é", {1, 2});
+    CHECK_STR(t.edit->text(), "abc");
+    t.preeditEnd(plat::CompositionEnd::Cancel);
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK(!t.edit->canUndo());
+
+    // Repeat with formatted selected span: bold 'b'
+    t.edit->setSelection(1, 2);
+    t.edit->toggleFormat(ui::TextEdit::Bold);
+    CHECK(t.edit->runs().size() == 3); // a (plain), b (bold), c (plain)
+    CHECK((t.edit->runs()[1].format & ui::TextEdit::Bold) != 0);
+
+    // Preedit over {1, 2} and cancel: formatting restored
+    t.preeditWithReplacement("é", {1, 2});
+    t.preeditEnd(plat::CompositionEnd::Cancel);
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK((t.edit->runs()[1].format & ui::TextEdit::Bold) != 0);
+
+    // Preedit over {1, 2} and commit: undo restores bold 'b'
+    t.preeditWithReplacement("é", {1, 2});
+    t.preeditEnd(plat::CompositionEnd::Commit);
+    CHECK_STR(t.edit->text(), "aéc");
+    CHECK(t.edit->undo());
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK((t.edit->runs()[1].format & ui::TextEdit::Bold) != 0);
+}
+
+TEST("textedit: IME Unicode replacement, multiline, and boundary checks") {
+    EditWin t;
+    // "A😀e\u0301Z": 'A' (1), '😀' (4), 'e' (1), combining acute (2), 'Z' (1) = 9 bytes
+    const std::string text = "A\xF0\x9F\x98\x80" "e\xCC\x81" "Z";
+    t.edit->setText(text);
+    CHECK(t.edit->text().size() == 9);
+
+    // Replace {5, 8} ("e\u0301") with "é"
+    t.textWithReplacement("é", {5, 8});
+    CHECK_STR(t.edit->text(), "A\xF0\x9F\x98\x80" "éZ");
+
+    // Invalid replacement range: splits emoji (bytes 1..5)
+    const std::string before = t.edit->text();
+    t.textWithReplacement("X", {2, 4}); // splits emoji
+    CHECK_STR(t.edit->text(), before);  // rejected, no mutation
+
+    // Invalid replacement range: out of bounds
+    t.textWithReplacement("X", {5, 50});
+    CHECK_STR(t.edit->text(), before);  // rejected
+
+    // Multiline replacement
+    t.edit->setText("line1\nline2\nline3");
+    // Replace "1\nline2\nline" from offset 4 to 16
+    t.textWithReplacement("REPLACED", {4, 16});
+    CHECK_STR(t.edit->text(), "lineREPLACED3");
+}
+
+TEST("textedit: IME document snapshot follows caret") {
+    EditWin t;
+    const auto &doc0 = plat::testing_internal::headlessTextInput(t.native()).document;
+    REQUIRE(doc0.has_value());
+    CHECK_STR(doc0->text, "");
+    CHECK(doc0->caret == 0 && doc0->anchor == 0);
+
+    t.type("hello");
+    const auto &doc1 = plat::testing_internal::headlessTextInput(t.native()).document;
+    REQUIRE(doc1.has_value());
+    CHECK_STR(doc1->text, "hello");
+    CHECK(doc1->caret == 5 && doc1->anchor == 5);
+
+    t.key(K::Left);
+    const auto &doc2 = plat::testing_internal::headlessTextInput(t.native()).document;
+    REQUIRE(doc2.has_value());
+    CHECK(doc2->caret == 4 && doc2->anchor == 4);
+
+    t.chord(plat::ModShift, K::Left);
+    const auto &doc3 = plat::testing_internal::headlessTextInput(t.native()).document;
+    REQUIRE(doc3.has_value());
+    CHECK(doc3->anchor == 4 && doc3->caret == 3);
+
+    // Masked field exposes nullopt document
+    t.edit->setMasked(true);
+    t.frame();
+    const auto &docMasked = plat::testing_internal::headlessTextInput(t.native()).document;
+    CHECK(!docMasked.has_value());
+}
+
+TEST("textedit: IME focus transfer commits once") {
+    Win w(400, 300);
+    auto *col = w.root().add<ui::View>();
+    col->style().items(ui::Align::Stretch);
+    auto *e1 = col->add<ui::TextEdit>();
+    auto *e2 = col->add<ui::TextEdit>();
+    w.frame();
+
+    // Focus e1
+    w.w->setFocus(e1);
+    w.frame();
+    CHECK(e1->focused());
+
+    plat::Event preedit;
+    preedit.type            = plat::EventType::TextPreedit;
+    preedit.window          = &w.native();
+    preedit.text            = "comp";
+    preedit.textReplacement = plat::TextRange{0, 0};
+    w.w->handle(preedit);
+    w.frame();
+
+    CHECK_STR(e1->preedit(), "comp");
+    CHECK_STR(e1->text(), "");
+
+    // Transfer focus to e2
+    w.w->setFocus(e2);
+    w.frame();
+    CHECK(e2->focused());
+    CHECK(!e1->focused());
+
+    // e1 committed its composition on focus transfer
+    CHECK_STR(e1->text(), "comp");
+    CHECK_STR(e1->preedit(), "");
+
+    // e2 receives only its own snapshot
+    const auto &doc2 = plat::testing_internal::headlessTextInput(w.native()).document;
+    REQUIRE(doc2.has_value());
+    CHECK_STR(doc2->text, "");
+}
+
+TEST("textedit: external edits finish composition") {
+    EditWin t;
+    t.type("abc");
+    t.preeditWithReplacement("é", {1, 2});
+    CHECK_STR(t.edit->preedit(), "é");
+
+    // Programmatic setText cancels overlay
+    t.edit->setText("fresh");
+    CHECK_STR(t.edit->text(), "fresh");
+    CHECK_STR(t.edit->preedit(), "");
+    CHECK(!t.edit->composition().has_value());
+
+    // Public setSelection finalizes active composition first
+    t.preeditWithReplacement("X", {1, 2});
+    t.edit->setSelection(0, 0);
+    CHECK_STR(t.edit->text(), "fXesh");
+    CHECK_STR(t.edit->preedit(), "");
+
+    // Undo removes the finalized composition first
+    CHECK(t.edit->undo());
+    CHECK_STR(t.edit->text(), "fresh");
 }

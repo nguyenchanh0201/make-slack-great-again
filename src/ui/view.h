@@ -500,7 +500,11 @@ public:
 
     // ── IME ─────────────────────────────────────────────────────────────────
     // caret in window coordinates; TextEdit calls it while focused.
-    void setTextInput(bool enabled, RectF caret);
+    void setTextInput(
+        bool                              enabled,
+        RectF                             caret,
+        std::optional<plat::TextDocument> document = std::nullopt
+    );
 
     // ── Painting ────────────────────────────────────────────────────────────
     void damage(RectF windowRect);
@@ -628,7 +632,8 @@ private:
     double                _verifyMs = 0;
 #endif
     int   _depth = 0; // handle() nesting, for the graveyard
-    RectF _textCaret;
+    RectF                             _textCaret;
+    std::optional<plat::TextDocument> _textDoc;
     Stats _stats;
 };
 
