@@ -578,6 +578,7 @@ Composer::Composer(screens::Context &ctx, DraftStash &drafts) : _ctx(ctx), _draf
         updatePickList();
         scheduleSpell();
     };
+    _edit->onPreeditChange   = [this] { refreshLook(); };
     _edit->onContextMenu     = [this](uint32_t offset, PointF at) { return spellMenu(offset, at); };
     _spellObserver           = spell::Checker::instance().observe([this] { respell(); });
     _edit->onSelectionChange = [this] { updatePickList(); };
@@ -752,7 +753,7 @@ void Composer::refreshLook() {
             _micBtn->setTint(tint);
         _box->setBorder(focused ? C::FieldBorderFocus : C::FieldBorder);
     }
-    const bool active = !str::trim(_edit->text()).empty() || !_files.empty();
+    const bool active = !str::trim(_edit->composedText()).empty() || !_files.empty();
     if (active != _active) {
         _active = active;
         static_cast<SendPart *>(_sendBtn)->setActive(active);
@@ -775,8 +776,8 @@ void Composer::refreshLook() {
 bool Composer::keyDown(const Event &e) {
     using shortcuts::Id;
     using shortcuts::matches;
-    if (!_edit->preedit().empty())
-        return false; // the IME owns the keyboard while composing (TextEdit's rule)
+    if (_edit->composition() || !_edit->preedit().empty())
+        return false; // let TextEdit finish an unconsumed composition key before app shortcuts
     const uint32_t mods = e.mods & ui::kModMask;
     // Voice input first: while a dictation of ours is in flight, Escape
     // cancels it ahead of every other Escape meaning (popups, edit mode).
@@ -1234,6 +1235,7 @@ bool Composer::acceptSuggestion() {
 }
 
 void Composer::stashNow() {
+    _edit->commitComposition();
     // While editing, the draft is the one set aside, not the message.
     _drafts.stash(
         _key,
@@ -1248,6 +1250,7 @@ void Composer::beginEdit(model::Ts ts) {
     const model::Message *m = _ctx.store().findMessage(_key.conv, ts);
     if (!m || m->user != _ctx.store().me || m->user == model::kNoUser)
         return;
+    _edit->commitComposition();
     if (!_editTs)
         _editStash = _edit->empty() ? std::string() : _edit->html();
     _editTs = ts;
@@ -1352,6 +1355,7 @@ void Composer::redialect(bool toMarkdown) {
 }
 
 bool Composer::send() {
+    _edit->commitComposition();
     if (onSendRequest) // an embedded composer (the forward dialog's)
         return onSendRequest();
     // CommonMark habits become mrkdwn, and
@@ -2019,6 +2023,7 @@ void Composer::openSchedule() {
             );
         return;
     }
+    _edit->commitComposition();
     if (str::trim(_edit->text()).empty())
         return;
     std::weak_ptr<int> alive = _alive;

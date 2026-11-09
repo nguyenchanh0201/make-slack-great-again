@@ -232,8 +232,13 @@ uint32_t TextEdit::paraLen(size_t i) const {
     const Para &p = _paras[i];
     if (_masked)
         return p.len * kBulletBytes;
-    if (_composition)
-        return toDisplay(p.start + p.len) - toDisplay(p.start);
+    if (_composition) {
+        const auto    &c      = *_composition;
+        const uint32_t from   = std::max(p.start, c.replacement.begin);
+        const uint32_t to     = std::min(p.start + p.len, c.replacement.end);
+        const uint32_t hidden = to > from ? to - from : 0;
+        return p.len - hidden + (holdsPreedit(p) ? uint32_t(c.text.size()) : 0);
+    }
     return p.len + (holdsPreedit(p) ? uint32_t(_preedit.size()) : 0);
 }
 
@@ -581,10 +586,27 @@ void TextEdit::ensureCaretVisible() {
         update();
 }
 
+std::string TextEdit::composedText() const {
+    std::string text = _text;
+    if (_composition) {
+        const auto &c = *_composition;
+        text.replace(c.replacement.begin, c.replacement.end - c.replacement.begin, c.text);
+    } else if (!_preedit.empty()) {
+        text.insert(_preeditPos, _preedit);
+    }
+    return text;
+}
+
 void TextEdit::finishComposition(bool commit) {
     if (!_composition && _preedit.empty())
         return;
     auto comp = std::move(_composition);
+    if (!comp && commit) {
+        const uint32_t cursor = _preeditCursor < 0
+                                    ? uint32_t(_preedit.size())
+                                    : uint32_t(std::clamp(_preeditCursor, 0, int(_preedit.size())));
+        comp = plat::TextComposition{{_preeditPos, _preeditPos}, _preedit, {cursor, cursor}};
+    }
     _composition.reset();
     _preedit.clear();
     _preeditCursor = -1;
@@ -598,13 +620,17 @@ void TextEdit::finishComposition(bool commit) {
         const std::string text  = std::move(comp->text);
         if (!text.empty() || replFrom != replTo) {
             const uint16_t f = typingFormat();
-            replace(replFrom, replTo, text, nullptr, f, EditKind::Typing);
+            replace(replFrom, replTo, text, nullptr, f, EditKind::Typing, comp->selection);
         } else {
             contentChanged();
         }
     } else {
         update();
         updateIme();
+        if (onPreeditChange) {
+            auto cb = onPreeditChange;
+            cb();
+        }
     }
 }
 
@@ -680,12 +706,13 @@ void TextEdit::apply(const Edit &e, bool reverse) {
 }
 
 void TextEdit::replace(
-    uint32_t         from,
-    uint32_t         to,
-    std::string_view ins,
-    const uint16_t  *fmt,
-    uint16_t         fill,
-    EditKind         kind
+    uint32_t                       from,
+    uint32_t                       to,
+    std::string_view               ins,
+    const uint16_t                *fmt,
+    uint16_t                       fill,
+    EditKind                       kind,
+    std::optional<plat::TextRange> selection
 ) {
     from = std::min(from, uint32_t(_text.size()));
     to   = std::clamp(to, from, uint32_t(_text.size()));
@@ -718,8 +745,17 @@ void TextEdit::replace(
         e.caretAfter  = _caret;
     } else {
         _caret = _anchor = from + uint32_t(ins.size());
-        e.anchorAfter = e.caretAfter = _caret;
-        _caretTyped                  = true;
+        if (selection) {
+            const uint32_t a = std::min(selection->begin, uint32_t(ins.size()));
+            const uint32_t b = std::min(selection->end, uint32_t(ins.size()));
+            if (isValidRange(ins, a, b)) {
+                _anchor = from + a;
+                _caret  = from + b;
+            }
+        }
+        e.anchorAfter = _anchor;
+        e.caretAfter  = _caret;
+        _caretTyped   = true;
     }
     // Coalesce runs of typing / deleting into one undo step.
     Edit *last   = _undo.empty() ? nullptr : &_undo.back();
@@ -1372,7 +1408,7 @@ bool TextEdit::onEvent(Event &e) {
         }
         const uint16_t f    = typingFormat();
         const bool     keep = _typingSet;
-        replace(from, to, t, nullptr, f, EditKind::Typing);
+        replace(from, to, t, nullptr, f, EditKind::Typing, e.raw->textSelection);
         if (keep) { // an explicit toggle holds for the rest of the typing run
             _typing    = f;
             _typingSet = true;
@@ -1396,6 +1432,23 @@ bool TextEdit::onEvent(Event &e) {
                 _preeditCursor = -1;
                 dropParaAt(_preeditPos);
                 contentChanged();
+            }
+            return true;
+        }
+        if (!e.raw->textReplacement && !_composition) {
+            if (_preedit.empty() && hasSelection())
+                deleteSelection();
+            if (_preedit.empty())
+                _preeditPos = std::min(_caret, uint32_t(_text.size()));
+            dropParaAt(_preeditPos);
+            _preedit       = e.raw->text;
+            _preeditCursor = e.raw->preeditCursorBegin;
+            invalidateLayout();
+            update();
+            updateIme();
+            if (onPreeditChange) {
+                auto cb = onPreeditChange;
+                cb();
             }
             return true;
         }
@@ -1427,6 +1480,10 @@ bool TextEdit::onEvent(Event &e) {
         invalidateLayout();
         update();
         updateIme();
+        if (onPreeditChange) {
+            auto cb = onPreeditChange;
+            cb();
+        }
         return true;
     }
     case EventType::PointerDown: {
@@ -1524,13 +1581,21 @@ bool TextEdit::onEvent(Event &e) {
     }
 
     // ── KeyDown ─────────────────────────────────────────────────────────────
+    if (_composition && e.key == K::Enter) {
+        finishComposition(true);
+        return true; // consume confirmation before a composer submit hook, even for empty preedit
+    }
     if (onKey) {
         auto cb = onKey;
         if (cb(e))
             return true;
     }
-    if (!_preedit.empty())
-        return true; // the IME owns the keyboard while composing
+    if (_composition) {
+        // Cocoa only forwards keys the input method did not consume.
+        finishComposition(true);
+    } else if (!_preedit.empty()) {
+        return true; // legacy backends leave composition key ownership to the IME
+    }
     currentLayout(); // caret movement asks the paragraphs' layouts
     const uint32_t m       = e.mods & kModMask;
     const uint32_t primary = plat::primaryMod();

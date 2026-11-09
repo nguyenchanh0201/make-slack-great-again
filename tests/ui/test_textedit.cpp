@@ -524,6 +524,123 @@ TEST("html: the tag scanner and attribute reader, forgiving and strict") {
     CHECK_FALSE(ui::rich::skippedTag(t, &depth, false));
 }
 
+TEST("textedit: insertion-only composition caret follows repeated typing") {
+    EditWin     t;
+    const float startX = t.edit->caretRect().x;
+    for (int n = 1; n <= 12; ++n) {
+        const std::string typed(size_t(n), 'c');
+        t.preeditWithReplacement(typed, {0, 0}, n);
+        const ui::RectF composing = t.edit->caretRect();
+        CHECK(composing.x > startX);
+        CHECK_STR(t.edit->text(), "");
+        t.preeditEnd(plat::CompositionEnd::Commit);
+        const ui::RectF committed = t.edit->caretRect();
+        CHECK(std::abs(composing.x - committed.x) < 0.1f);
+        CHECK(std::abs(composing.y - committed.y) < 0.1f);
+        t.edit->clear();
+    }
+}
+
+TEST("textedit: composition appended to a paragraph has its full caret width") {
+    EditWin t;
+    for (const std::string &base : {std::string("hello"), std::string("first\nhello")}) {
+        t.edit->setText(base);
+        t.edit->setSelection(uint32_t(base.size()), uint32_t(base.size()));
+        t.preeditWithReplacement("é😀", {uint32_t(base.size()), uint32_t(base.size())}, 6);
+        const ui::RectF composing = t.edit->caretRect();
+        t.preeditEnd(plat::CompositionEnd::Commit);
+        const ui::RectF committed = t.edit->caretRect();
+        CHECK(std::abs(composing.x - committed.x) < 0.1f);
+        CHECK(std::abs(composing.y - committed.y) < 0.1f);
+    }
+}
+
+TEST("textedit: unconsumed arrows finalize document composition and move") {
+    EditWin t;
+    t.preeditWithReplacement("cccc", {0, 0}, 4);
+    t.key(K::Left);
+    CHECK_STR(t.edit->text(), "cccc");
+    CHECK(!t.edit->composition());
+    CHECK(t.edit->caret() == 3);
+    t.textWithReplacement("é", {2, 3});
+    CHECK_STR(t.edit->text(), "ccéc");
+
+    t.edit->clear();
+    t.preeditWithReplacement("abc", {0, 0}, 3);
+    t.chord(plat::ModShift, K::Left);
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK(t.edit->anchor() == 3 && t.edit->caret() == 2);
+}
+
+TEST("textedit: unconsumed Enter confirms document composition without submitting") {
+    EditWin t;
+    int     submits  = 0;
+    t.edit->onSubmit = [&] {
+        ++submits;
+        return true;
+    };
+    t.preeditWithReplacement("chào", {0, 0});
+    t.key(K::Enter);
+    CHECK_STR(t.edit->text(), "chào");
+    CHECK(!t.edit->composition());
+    CHECK(submits == 0);
+    t.key(K::Enter);
+    CHECK(submits == 1);
+}
+
+TEST("textedit: explicit commit retains legacy preedit text") {
+    EditWin t;
+    t.type("ab");
+    t.key(K::Left);
+    t.preedit("é", 2);
+    CHECK_STR(t.edit->composedText(), "aéb");
+    t.edit->commitComposition();
+    CHECK_STR(t.edit->text(), "aéb");
+    CHECK(t.edit->caret() == 3);
+    CHECK(t.edit->preedit().empty());
+}
+
+TEST("textedit: confirming composition retains its internal selection and undo state") {
+    EditWin t;
+    t.preeditWithReplacement("abc", {0, 0}, 1);
+    t.key(K::Left);
+    CHECK_STR(t.edit->text(), "abc");
+    CHECK(t.edit->caret() == 0);
+
+    t.edit->clear();
+    plat::Event raw{
+        .type               = plat::EventType::TextPreedit,
+        .text               = "abc",
+        .preeditCursorBegin = 1,
+        .preeditCursorEnd   = 2
+    };
+    raw.textReplacement = plat::TextRange{0, 0};
+    t.w->handle(raw);
+    t.preeditEnd(plat::CompositionEnd::Commit);
+    CHECK_STR(t.edit->selectedText(), "b");
+    CHECK(t.edit->undo());
+    CHECK(t.edit->redo());
+    CHECK_STR(t.edit->selectedText(), "b");
+}
+
+TEST("textedit: empty composition Enter is consumed before submit hooks") {
+    EditWin t;
+    t.edit->setText("draft");
+    int hooked    = 0;
+    t.edit->onKey = [&](const ui::Event &e) {
+        if (e.key == K::Enter) {
+            ++hooked;
+            return true;
+        }
+        return false;
+    };
+    t.preeditWithReplacement("", {0, 5}, 0);
+    t.key(K::Enter);
+    CHECK(hooked == 0);
+    CHECK(!t.edit->composition());
+    CHECK_STR(t.edit->text(), "");
+}
+
 TEST("textedit: IME replacement after navigation") {
     EditWin t;
     t.type("abc");

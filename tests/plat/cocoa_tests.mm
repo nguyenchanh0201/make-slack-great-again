@@ -24,6 +24,20 @@ using namespace plat_test;
 @implementation FakeDragInfo
 @end
 
+// Deterministic native callback sequences, without changing the user's input source.
+@interface                BatchInputView : PlatView
+@property(nonatomic) BOOL unmarkFirst;
+@end
+@implementation BatchInputView
+- (void)interpretKeyEvents:(NSArray<NSEvent *> *)events {
+    if (self.unmarkFirst)
+        [self unmarkText];
+    else
+        [self insertText:@"a" replacementRange:NSMakeRange(NSNotFound, 0)];
+    [self insertText:@"X" replacementRange:NSMakeRange(NSNotFound, 0)];
+}
+@end
+
 namespace {
 
 bool has(const std::vector<std::string> &v, const char *s) {
@@ -732,6 +746,195 @@ void caseImeMarkedReplacement() {
     }
 }
 
+void caseImePartialMarkedSelection() {
+    @autoreleasepool {
+        std::string err;
+        auto        app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        auto      win  = app->createWindow({.title = "ime partial selection", .size = {160, 120}});
+        PlatView *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        win->setTextInput(
+            {.enabled = true, .document = TextDocument{.text = "LR", .anchor = 1, .caret = 1}}
+        );
+        [view setMarkedText:@"😀ac"
+               selectedRange:NSMakeRange(4, 0)
+            replacementRange:NSMakeRange(1, 0)];
+        got.clear();
+        [view setMarkedText:@"é"
+               selectedRange:NSMakeRange(1, 0)
+            replacementRange:NSMakeRange(3, 1)];
+        CHECK(got.size() == 1);
+        if (got.size() != 1)
+            return;
+        CHECK(got[0].text == "😀éc");
+        CHECK(got[0].preeditCursorBegin == 6);
+        CHECK(got[0].preeditCursorEnd == 6);
+        CHECK([view selectedRange].location == 4);
+
+        win->setTextInput(
+            {.enabled = true, .document = TextDocument{.text = "LR", .anchor = 1, .caret = 1}}
+        );
+        [view setMarkedText:@"abc"
+               selectedRange:NSMakeRange(3, 0)
+            replacementRange:NSMakeRange(1, 0)];
+        got.clear();
+        [view setMarkedText:@"X"
+               selectedRange:NSMakeRange(1, 0)
+            replacementRange:NSMakeRange(3, 2)];
+        CHECK(got.size() == 1);
+        if (got.size() != 1)
+            return;
+        CHECK(got[0].text == "abX");
+        CHECK(got[0].preeditCursorBegin == 3);
+        CHECK([view selectedRange].location == 4);
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeRejectsInvalidEdits() {
+    @autoreleasepool {
+        std::string err;
+        auto        app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        auto      win  = app->createWindow({.title = "ime invalid edits", .size = {160, 120}});
+        PlatView *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        for (NSRange invalid :
+             {NSMakeRange(4, 0), NSMakeRange(2, 2), NSMakeRange(1, NSUIntegerMax)}) {
+            win->setTextInput(
+                {.enabled = true, .document = TextDocument{.text = "abc", .anchor = 3, .caret = 3}}
+            );
+            got.clear();
+            [view insertText:@"X" replacementRange:invalid];
+            CHECK(got.empty());
+            CHECK([view selectedRange].location == 3);
+            got.clear();
+            [view setMarkedText:@"X" selectedRange:NSMakeRange(1, 0) replacementRange:invalid];
+            CHECK(got.empty());
+            CHECK(![view hasMarkedText]);
+        }
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeDisjointMarkedEdits() {
+    @autoreleasepool {
+        std::string err;
+        auto        app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        auto      win  = app->createWindow({.title = "ime disjoint edits", .size = {160, 120}});
+        PlatView *view = static_cast<cocoa::CocoaWindow &>(*win).view;
+        for (bool mark : {false, true}) {
+            for (bool before : {false, true}) {
+                win->setTextInput(
+                    {.enabled  = true,
+                     .document = TextDocument{.text = "abcdef", .anchor = 1, .caret = 1}}
+                );
+                [view setMarkedText:(before ? @"E" : @"B")
+                       selectedRange:NSMakeRange(1, 0)
+                    replacementRange:NSMakeRange(before ? 4 : 1, 1)];
+                got.clear();
+                NSRange r = NSMakeRange(before ? 1 : 4, 1);
+                if (mark)
+                    [view setMarkedText:@"X" selectedRange:NSMakeRange(1, 0) replacementRange:r];
+                else
+                    [view insertText:@"X" replacementRange:r];
+                CHECK(got.size() == 1);
+                if (got.size() != 1)
+                    return;
+                CHECK(got[0].text == (before ? "XcdE" : "BcdX"));
+                CHECK(got[0].textReplacement == std::optional<plat::TextRange>({1, 5}));
+            }
+        }
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
+void caseImeBatchedCallbacks() {
+    @autoreleasepool {
+        std::string err;
+        auto        app = createCocoaApp(&err);
+        if (!app) {
+            skip("no window-server session: " + err);
+            return;
+        }
+        auto            win   = app->createWindow({.title = "ime batch", .size = {160, 120}});
+        auto           &cw    = static_cast<cocoa::CocoaWindow &>(*win);
+        BatchInputView *view  = [[BatchInputView alloc] initWithFrame:NSMakeRect(0, 0, 160, 120)];
+        view.owner            = &cw;
+        cw.view               = view;
+        cw.window.contentView = view;
+        auto key              = [&] {
+            return [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                    location:NSZeroPoint
+                               modifierFlags:0
+                                   timestamp:0
+                                windowNumber:cw.window.windowNumber
+                                     context:nil
+                                  characters:@"x"
+                 charactersIgnoringModifiers:@"x"
+                                   isARepeat:NO
+                                     keyCode:7];
+        };
+        std::vector<Event> got;
+        app->setEventHandler([&](const Event &e) { got.push_back(e); });
+        win->setTextInput(
+            {.enabled = true, .document = TextDocument{.text = "A", .anchor = 1, .caret = 1}}
+        );
+        [view setMarkedText:@"bc"
+               selectedRange:NSMakeRange(2, 0)
+            replacementRange:NSMakeRange(1, 0)];
+        view.unmarkFirst = YES;
+        got.clear();
+        [view keyDown:key()];
+        CHECK(got.size() == 2);
+        if (got.size() == 2) {
+            CHECK(got[0].compositionEnd == CompositionEnd::Commit);
+            CHECK(got[1].textReplacement == std::optional<plat::TextRange>({3, 3}));
+        }
+        // Each callback can change focus or authoritatively replace the document.
+        view.unmarkFirst = NO;
+        for (bool focusChange : {false, true}) {
+            win->setTextInput({.enabled = true, .document = TextDocument{}});
+            int delivered = 0;
+            app->setEventHandler([&](const Event &e) {
+                if (e.type != EventType::TextInput)
+                    return;
+                ++delivered;
+                if (delivered == 1) {
+                    if (focusChange)
+                        win->setTextInput({.enabled = false});
+                    win->setTextInput(
+                        {.enabled  = true,
+                         .document = TextDocument{.text = "fresh", .anchor = 5, .caret = 5}}
+                    );
+                }
+            });
+            [view keyDown:key()];
+            CHECK(delivered == 1);
+        }
+        win.reset();
+        pumpRunLoop(0.05);
+    }
+}
+
 void caseImeCallbackOrdering() {
     @autoreleasepool {
         std::string          err;
@@ -910,21 +1113,39 @@ void caseImeKeyOwnership() {
 
 } // namespace
 
-int main() {
-    runCase("a TIFF-only picture is offered and read as PNG", caseTiffOnlyPictureReadsAsPng);
-    runCase("partial presents keep every frame", casePartialPresentsKeepEveryFrame);
-    runCase("drop target: types while hovering, data once on drop", caseDropTargetEvents);
-    runCase("full screen parks the title-bar toolbar and always puts it back",
-            caseFullScreenParksTheToolbar);
-    runCase("full screen leaves a system title bar alone", caseFullScreenLeavesSystemDecorationsAlone);
-    runCase("the Window menu has one full-screen entry and both shortcuts",
-            caseWindowMenuHasOneFullScreenEntry);
+int main(int argc, char **argv) {
+    const bool imeOnly = argc == 2 && std::strcmp(argv[1], "--ime-only") == 0;
+    if (argc > 1 && !imeOnly)
+        return 2;
+    if (!imeOnly) {
+        runCase("a TIFF-only picture is offered and read as PNG", caseTiffOnlyPictureReadsAsPng);
+        runCase("partial presents keep every frame", casePartialPresentsKeepEveryFrame);
+        runCase("drop target: types while hovering, data once on drop", caseDropTargetEvents);
+        runCase(
+            "full screen parks the title-bar toolbar and always puts it back",
+            caseFullScreenParksTheToolbar
+        );
+        runCase(
+            "full screen leaves a system title bar alone",
+            caseFullScreenLeavesSystemDecorationsAlone
+        );
+        runCase(
+            "the Window menu has one full-screen entry and both shortcuts",
+            caseWindowMenuHasOneFullScreenEntry
+        );
+    }
 
     // Native IME tests
     runCase("IME document queries and selectedRange", caseImeDocumentQueries);
     runCase("IME replacement ranges and empty-text replacement", caseImeReplacementRanges);
     runCase("IME multi-byte and surrogate unicode ranges", caseImeUnicodeRanges);
     runCase("IME marked replacement over existing text", caseImeMarkedReplacement);
+    runCase("IME partial marked replacement preserves caret prefix", caseImePartialMarkedSelection);
+    runCase("IME rejects out-of-bounds and overflowing edit ranges", caseImeRejectsInvalidEdits);
+    runCase("IME disjoint marked edits preserve intervening text", caseImeDisjointMarkedEdits);
+    runCase(
+        "IME batched callbacks retain ordering and document ownership", caseImeBatchedCallbacks
+    );
     runCase("IME callback ordering: KeyDown before TextInput", caseImeCallbackOrdering);
     runCase("IME end composition commit, cancel and idempotency", caseImeEndComposition);
     runCase("IME key ownership and unconsumed arrow routing", caseImeKeyOwnership);
