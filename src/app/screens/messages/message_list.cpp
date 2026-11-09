@@ -16,6 +16,9 @@
 #include "app/screens/messages/rich.h"
 #include "app/screens/messages/rows.h"
 #include "app/screens/messages/summary.h"
+#include "app/screens/messages/thread_panel.h"
+#include "app/screens/shell/composer.h"
+#include "app/screens/shell/typing_indicator.h"
 #include "base/file.h"
 #include "base/i18n.h"
 #include "base/log.h"
@@ -23,6 +26,7 @@
 #include "base/str.h"
 #include "base/time.h"
 #include "gfx/icons_generated.h"
+#include "plat/video.h"
 #include "ui/controls.h"
 
 #include <algorithm>
@@ -147,84 +151,460 @@ public:
 class FileViewer final : public ui::Popup {
 public:
     FileViewer(Context &ctx, MessageList *list, Ts ts, const model::File &f)
-        : _ctx(ctx), _list(list), _ts(ts), _file(f) {
+        : FileViewer(ctx, list, std::vector<ViewerItem>{{ts, f}}, 0) {}
+
+    FileViewer(
+        Context                &ctx,
+        MessageList            *list,
+        std::vector<ViewerItem> items,
+        size_t                  initialIndex
+    )
+        : _ctx(ctx), _list(list), _items(std::move(items)) {
         setCard(false);
         setAnchor({0, 0, 0, 0}, Place::Fill);
         style().dir = ui::Dir::None;
-        _bar        = add<ui::View>();
+
+        if (initialIndex >= _items.size())
+            initialIndex = 0;
+        _currentIndex = initialIndex;
+        if (!_items.empty()) {
+            _ts   = _items[_currentIndex].ts;
+            _file = _items[_currentIndex].file;
+        }
+
+        // The thumbnail at once, the original over it once it is in (an
+        // image's; a PDF shows its rendered page only).
+        const std::string &shown = _file.isImage() ? _file.path : _file.thumb;
+        _thumb = add<CachedImage>(ctx.images, shown, ImageCache::Shape::Square);
+        _thumb->setPlaceholder(C::None);
+        _thumb->setLoadingText(tr("Loading image\xE2\x80\xA6"), C::OnDarkDim);
+        _thumb->setAnimated(isGifPath(shown));
+        if (_file.isImage() && _file.source() != _file.path) {
+            _full = add<CachedImage>(ctx.images, _file.source(), ImageCache::Shape::Square);
+            _full->setPlaceholder(C::None);
+        }
+
+        _prevBtn = add<NavButton>(gfx::Icon::ChevronLeft, tr("Previous image"));
+        _prevBtn->onClick = [this] {
+            if (_currentIndex > 0)
+                setIndex(_currentIndex - 1);
+        };
+
+        _nextBtn = add<NavButton>(gfx::Icon::ChevronRight, tr("Next image"));
+        _nextBtn->onClick = [this] {
+            if (_currentIndex + 1 < _items.size())
+                setIndex(_currentIndex + 1);
+        };
+
+        if (_list) {
+            _threadPanel = add<ThreadPanel>(_ctx);
+            _threadPanel->setVisible(false);
+            if (auto *cb = static_cast<ui::Clickable *>(_threadPanel->closeButton())) {
+                cb->onClick = [this] {
+                    toggleThread();
+                };
+            }
+            if (auto *bb = static_cast<ui::Clickable *>(_threadPanel->backButton())) {
+                bb->onClick = [this] {
+                    toggleThread();
+                };
+            }
+
+            _typing = static_cast<shell::TypingIndicator *>(
+                _threadPanel->setTyping(std::make_unique<shell::TypingIndicator>(_ctx))
+            );
+
+            if (_ctx.drafts) {
+                auto comp = std::make_unique<shell::Composer>(_ctx, *_ctx.drafts);
+                comp->setThreadMode(true);
+                _composer = static_cast<shell::Composer *>(_threadPanel->setComposer(std::move(comp)));
+                _composer->broadcastWanted = [this] {
+                    return _threadPanel ? _threadPanel->broadcastWanted() : false;
+                };
+                _composer->onSent = [this] {
+                    if (_threadPanel)
+                        _threadPanel->setBroadcastWanted(false);
+                };
+                _composer->onCompositionChanged = [this] {
+                    if (_threadPanel && _composer)
+                        _threadPanel->setBroadcastBlocked(
+                            _composer->editing() || !_composer->attachments().empty()
+                        );
+                };
+            }
+
+            _splitter = add<Splitter>();
+            _splitter->setVisible(false);
+            _splitter->currentW = [this] { return _threadW; };
+            _splitter->onDrag = [this](float startW, float delta) {
+                const float maxW = std::max(340.0f, std::min(600.0f, width() * 0.5f));
+                const float minW = std::min(340.0f, maxW);
+                _threadW = std::clamp(startW + delta, minW, maxW);
+                invalidateLayout();
+                update();
+            };
+        }
+
+        _bar = add<ui::View>();
         _bar->style()
             .row()
             .padding(kBarLeft, 0, 24 - 8, 0)
             .spacing(ui::metric(ui::M::SpaceXS))
             .items(ui::Align::Center);
-        auto *name = ui::styledLabel(
+        _nameLabel = ui::styledLabel(
             _bar,
-            f.name,
+            "",
             ui::pxFont(15 * 1.05f, text::Weight::Regular, ui::color(C::TooltipText)),
             1
         );
-        name->style().flex(1);
-        const model::Message *m       = list ? list->message(ts) : nullptr;
-        // A pending message has no actions yet (the file bar's rule).
-        const bool            actions = list && m && !m->pending;
-        auto                  button  = [&](gfx::Icon icon, const char *tip, bool on) {
+        _nameLabel->style().flex(1);
+
+        auto button = [&](gfx::Icon icon, const char *tip) {
             auto *b = _bar->add<ViewerButton>(icon, tr(tip));
-            b->setVisible(on);
             return b;
         };
-        button(gfx::Icon::Download, N_("Download"), actions)->onClick = [this] {
-            _list->downloadFile(_ts, _file.path);
+        _downloadBtn = button(gfx::Icon::Download, N_("Download"));
+        _downloadBtn->onClick = [this] {
+            if (_list)
+                _list->downloadFile(_ts, _file.path);
         };
-        // A shared message's file is only viewed: forwarding sends the message's own.
-        const bool forward = actions && bool(ctx.forwardMessage) && fileAt(m, f.path);
-        button(gfx::Icon::Share2, N_("Forward"), forward)->onClick = [this] {
-            close(); // the forward dialog replaces the viewer
-            if (_ctx.forwardMessage)
+        _forwardBtn = button(gfx::Icon::Share2, N_("Forward"));
+        _forwardBtn->onClick = [this] {
+            close();
+            if (_ctx.forwardMessage && _list)
                 _ctx.forwardMessage(_list->conversation(), _ts, _file.path);
         };
-        button(
-            gfx::Icon::ExternalLink,
-            N_("Open in browser"),
-            actions && !(f.permalink.empty() && f.path.empty())
-        )
-            ->onClick = [this] {
+        _browserBtn = button(gfx::Icon::ExternalLink, N_("Open in browser"));
+        _browserBtn->onClick = [this] {
             if (_ctx.openUrl)
                 _ctx.openUrl(fileUrl(_file.permalink.empty() ? _file.path : _file.permalink));
         };
-        auto *more    = button(gfx::Icon::MoreHorizontal, N_("More actions"), actions);
-        more->onClick = [this, more] {
-            const ui::RectF r = more->windowRect();
-            _list->openFileMenu(_ts, _file.path, {r.x, r.y + r.h + 2});
+        _moreBtn = button(gfx::Icon::MoreHorizontal, N_("More actions"));
+        _moreBtn->onClick = [this] {
+            if (_list) {
+                const ui::RectF r = _moreBtn->windowRect();
+                _list->openFileMenu(_ts, _file.path, {r.x, r.y + r.h + 2});
+            }
         };
-        button(gfx::Icon::X, N_("Close"), true)->onClick = [this] { close(); };
-        // The thumbnail at once, the original over it once it is in (an
-        // image's; a PDF shows its rendered page only).
-        const std::string &shown                         = f.isImage() ? f.path : f.thumb;
-        _thumb = add<CachedImage>(ctx.images, shown, ImageCache::Shape::Square);
-        _thumb->setPlaceholder(C::None);
-        _thumb->setLoadingText(tr("Loading image\xE2\x80\xA6"), C::OnDarkDim);
-        _thumb->setAnimated(isGifPath(shown));
-        if (f.isImage() && f.source() != f.path) {
-            _full = add<CachedImage>(ctx.images, f.source(), ImageCache::Shape::Square);
-            _full->setPlaceholder(C::None);
+        if (_list) {
+            _threadBtn = button(gfx::Icon::MessageSquare, N_("Thread"));
+            _threadBtn->onClick = [this] {
+                toggleThread();
+            };
         }
+        button(gfx::Icon::X, N_("Close"))->onClick = [this] { close(); };
+
+        _controlsBar = add<VideoControlsBar>();
+        _controlsBar->style()
+            .row()
+            .items(ui::Align::Center)
+            .spacing(12)
+            .padding(14, 0, 14, 0);
+
+        _videoPlayBtn = _controlsBar->add<ViewerButton>(gfx::Icon::Play, tr("Play"));
+        _videoPlayBtn->onClick = [this] { togglePlayPause(); };
+
+        _timeLabel = ui::styledLabel(
+            _controlsBar,
+            "00:00 / 00:00",
+            ui::pxFont(12, text::Weight::Regular, ui::color(C::TooltipText)),
+            1
+        );
+        _timeLabel->style().noShrink();
+        _timeLabel->setHitTransparent(true);
+
+        _scrubber = _controlsBar->add<VideoScrubber>();
+        _scrubber->style().flex(1);
+        _scrubber->onSeek = [this](int64_t ms) {
+            if (_videoPlayer)
+                _videoPlayer->seek(ms);
+        };
+        _scrubber->onScrubbing = [this](int64_t ms) {
+            int64_t dur = _videoPlayer ? _videoPlayer->durationMs() : _file.durationMs;
+            if (dur <= 0)
+                dur = _file.durationMs;
+            updateTimecode(ms, dur);
+        };
+
+        _muteBtn = _controlsBar->add<MuteButton>();
+        _muteBtn->onClick = [this] { toggleMute(); };
+        _muteBtn->onVolume = [this](float delta) {
+            _volume = std::clamp(_volume + delta, 0.0f, 1.0f);
+            if (_videoPlayer)
+                _videoPlayer->setVolume(_volume);
+            if (_volume > 0.0f && _isMuted) {
+                _isMuted = false;
+                if (_videoPlayer)
+                    _videoPlayer->setMuted(false);
+                _muteBtn->setMuted(false);
+            }
+        };
+
+        _controlsBar->setVisible(false);
+
+        setIndex(_currentIndex);
         setFocusable(true);
     }
-    void layout() override {
-        const float w = width();
-        _bar->setFrame({0, 0, w, kBarH});
-        const ui::RectF r = imageRect();
-        _thumb->setFrame(r);
-        if (_full)
-            _full->setFrame(r);
+
+    ~FileViewer() override {
+        if (_composer)
+            _composer->stashNow();
+        _alive.reset();
+        if (_videoPlayer) {
+            _videoPlayer->pause();
+            _videoPlayer->setVisible(false);
+            _videoPlayer.reset();
+        }
     }
-    void paint(gfx::Painter &p) override { p.fillRect(bounds(), ui::color(C::ViewerBackdrop)); }
+
+    void close() {
+        if (_composer)
+            _composer->stashNow();
+        _alive.reset();
+        if (_videoPlayer) {
+            _videoPlayer->pause();
+            _videoPlayer->setVisible(false);
+            _videoPlayer.reset();
+        }
+        Popup::close();
+    }
+
+    void windowChanged() override {
+        Popup::windowChanged();
+        ensureVideoPlayer();
+        if (_file.isVideo())
+            loadCurrentVideo();
+    }
+
+    void setIndex(size_t index) {
+        if (index >= _items.size())
+            return;
+        if (_composer)
+            _composer->stashNow();
+        if (_videoPlayer) {
+            _videoPlayer->pause();
+            _videoPlayer->setVisible(false);
+            _videoPlayerReady = false;
+        }
+
+        _currentIndex = index;
+        _ts           = _items[index].ts;
+        _file         = _items[index].file;
+
+        std::string title = _file.name;
+        if (_items.size() > 1) {
+            title += " (" + std::to_string(_currentIndex + 1) + " of " +
+                     std::to_string(_items.size()) + ")";
+        }
+        _nameLabel->setText(std::move(title));
+
+        const model::Message *m       = _list ? _list->message(_ts) : nullptr;
+        const bool            actions = _list && m && !m->pending;
+        _downloadBtn->setVisible(actions);
+
+        const bool forward = actions && bool(_ctx.forwardMessage) && fileAt(m, _file.path);
+        _forwardBtn->setVisible(forward);
+
+        _browserBtn->setVisible(actions && !(_file.permalink.empty() && _file.path.empty()));
+        _moreBtn->setVisible(actions);
+
+        if (_prevBtn)
+            _prevBtn->setVisible(_items.size() > 1 && _currentIndex > 0);
+        if (_nextBtn)
+            _nextBtn->setVisible(_items.size() > 1 && _currentIndex + 1 < _items.size());
+
+        const bool isVid = _file.isVideo();
+        if (_controlsBar)
+            _controlsBar->setVisible(isVid);
+
+        const std::string &shown = _file.isImage() ? _file.path : _file.thumb;
+        if (_thumb) {
+            _thumb->setPath(shown);
+            _thumb->setAnimated(isGifPath(shown));
+            if (isVid)
+                _thumb->setLoadingText(tr("Loading video\xE2\x80\xA6"), C::OnDarkDim);
+            else
+                _thumb->setLoadingText(tr("Loading image\xE2\x80\xA6"), C::OnDarkDim);
+        }
+        if (_file.isImage() && _file.source() != _file.path) {
+            if (!_full) {
+                _full = add<CachedImage>(_ctx.images, _file.source(), ImageCache::Shape::Square);
+                _full->setPlaceholder(C::None);
+            } else {
+                _full->setPath(_file.source());
+                _full->setVisible(true);
+            }
+        } else if (_full) {
+            _full->setVisible(false);
+        }
+
+        if (isVid) {
+            ensureVideoPlayer();
+            loadCurrentVideo();
+        }
+
+        if (_showThread && _threadPanel)
+            updateThread();
+
+        invalidateLayout();
+        update();
+    }
+
+    void toggleThread() {
+        if (_showThread && _composer)
+            _composer->stashNow();
+        _showThread = !_showThread;
+        updateThread();
+        invalidateLayout();
+        update();
+    }
+
+    void updateThread() {
+        if (!_threadPanel)
+            return;
+        const bool show = _showThread && (width() > 600.0f);
+        _threadPanel->setVisible(show);
+        if (_splitter)
+            _splitter->setVisible(show);
+        if (_threadBtn)
+            _threadBtn->setActive(show);
+        if (show && _list) {
+            const model::Message *m = _list->message(_ts);
+            const Ts root = (m && m->threadTs != 0) ? m->threadTs : _ts;
+            _threadPanel->show(_list->conversation(), root);
+            if (_typing)
+                _typing->setTarget(_list->conversation(), root);
+            if (_composer)
+                _composer->setTarget(_list->conversation(), root);
+        }
+    }
+
+    void layout() override {
+        const float w             = width(), h = height();
+        const float maxW          = std::max(340.0f, std::min(600.0f, w * 0.5f));
+        const float minW          = std::min(340.0f, maxW);
+        const float actualThreadW = std::clamp(_threadW, minW, maxW);
+        const bool  hasThread     = _showThread && _threadPanel && (w > 600.0f);
+        const float stageW        = hasThread ? (w - actualThreadW) : w;
+
+        if (_threadPanel) {
+            _threadPanel->setVisible(hasThread);
+            if (hasThread)
+                _threadPanel->setFrame({stageW, 0, actualThreadW, h});
+        }
+        if (_splitter) {
+            _splitter->setVisible(hasThread);
+            if (hasThread)
+                _splitter->setFrame({stageW - Splitter::kW / 2.0f, 0, Splitter::kW, h});
+        }
+
+        _bar->setFrame({0, 0, stageW, kBarH});
+
+        const bool  isVid         = _file.isVideo();
+        const float bottomReserve = isVid ? 64.0f : 0.0f;
+        const ui::RectF r         = imageRect(stageW, bottomReserve);
+        _thumb->setFrame(r);
+        if (_full && _full->visible())
+            _full->setFrame(r);
+
+        if (_controlsBar) {
+            _controlsBar->setVisible(isVid);
+            if (isVid) {
+                const float barW = std::clamp(stageW - 120.0f, 320.0f, 620.0f);
+                const float barH = 44.0f;
+                const float barX = std::floor((stageW - barW) / 2.0f);
+                const float barY = h - barH - 18.0f;
+                _controlsBar->setFrame({barX, barY, barW, barH});
+            }
+        }
+
+        if (_videoPlayer) {
+            if (isVid && _videoPlayerReady) {
+                _videoPlayer->setFrame({int(r.x), int(r.y), int(r.w), int(r.h)});
+                _videoPlayer->setVisible(true);
+            } else {
+                _videoPlayer->setVisible(false);
+            }
+        }
+
+        constexpr float kNavSize   = 44.0f;
+        constexpr float kNavMargin = 24.0f;
+        const float     navY       = kBarH + (h - kBarH - kNavSize) / 2.0f;
+        if (_prevBtn)
+            _prevBtn->setFrame({kNavMargin, navY, kNavSize, kNavSize});
+        if (_nextBtn)
+            _nextBtn->setFrame({stageW - kNavMargin - kNavSize, navY, kNavSize, kNavSize});
+    }
+
+    void paint(gfx::Painter &p) override {
+        p.fillRect(bounds(), ui::color(C::ViewerBackdrop));
+        if (_showThread && _threadPanel && _threadPanel->visible()) {
+            const float x = _threadPanel->frame().x;
+            p.drawLine({x, 0}, {x, height()}, 1.0f, ui::color(C::Border));
+        }
+    }
+
     bool onEvent(ui::Event &e) override {
         if (e.type == ui::EventType::PointerDown) {
-            // The backdrop closes it; the picture and the bar don't.
-            if (e.button == plat::Button::Left && e.pos.y > kBarH && !imageRect().contains(e.pos))
+            const float w             = width();
+            const float maxW          = std::max(340.0f, std::min(600.0f, w * 0.5f));
+            const float minW          = std::min(340.0f, maxW);
+            const float actualThreadW = std::clamp(_threadW, minW, maxW);
+            const bool  hasThread     = _showThread && _threadPanel && _threadPanel->visible();
+            const float stageW        = hasThread ? (w - actualThreadW) : w;
+            const float reserve       = _file.isVideo() ? 64.0f : 0.0f;
+            const ui::RectF vidRect   = imageRect(stageW, reserve);
+            if (e.button == plat::Button::Left && _file.isVideo() && vidRect.contains(e.pos)) {
+                togglePlayPause();
+                return true;
+            }
+            // The backdrop closes it; the picture, nav buttons, thread panel, splitter, controls and the bar don't.
+            if (e.button == plat::Button::Left && e.pos.y > kBarH && !vidRect.contains(e.pos)) {
+                if (hasThread && _threadPanel->frame().contains(e.pos))
+                    return false;
+                if (_splitter && _splitter->visible() && _splitter->frame().contains(e.pos))
+                    return false;
+                if (_prevBtn && _prevBtn->visible() && _prevBtn->frame().contains(e.pos))
+                    return false;
+                if (_nextBtn && _nextBtn->visible() && _nextBtn->frame().contains(e.pos))
+                    return false;
+                if (_controlsBar && _controlsBar->visible() && _controlsBar->frame().contains(e.pos))
+                    return false;
                 close();
+            }
             return true;
+        }
+        if (e.type == ui::EventType::KeyDown) {
+            const uint32_t primary = plat::primaryMod();
+            if (e.key == plat::Key::T && (e.mods & primary) && (e.mods & plat::ModShift) &&
+                !(e.mods & ~(primary | plat::ModShift))) {
+                toggleThread();
+                return true;
+            }
+            if (e.key == plat::Key::Space) {
+                if (_file.isVideo()) {
+                    togglePlayPause();
+                    return true;
+                }
+            }
+            if (e.key == plat::Key::Left || e.key == plat::Key::PageUp) {
+                if (_currentIndex > 0)
+                    setIndex(_currentIndex - 1);
+                return true;
+            }
+            if (e.key == plat::Key::Right || e.key == plat::Key::PageDown) {
+                if (_currentIndex + 1 < _items.size())
+                    setIndex(_currentIndex + 1);
+                return true;
+            }
+            if (e.key == plat::Key::Escape) {
+                if (_showThread && _threadPanel && _threadPanel->visible()) {
+                    toggleThread();
+                    return true;
+                }
+                close();
+                return true;
+            }
         }
         return Popup::onEvent(e); // Escape
     }
@@ -238,6 +618,189 @@ private:
 #else
     static constexpr float kBarLeft = 24;
 #endif
+
+    class VideoControlsBar final : public ui::View {
+    public:
+        void paint(gfx::Painter &p) override {
+            const ui::RectF b = bounds();
+            if (b.w <= 0 || b.h <= 0)
+                return;
+            p.fillRoundRect(b, b.h / 2.0f, 0xd91c1c1cU);
+            p.strokeRoundRect(b, b.h / 2.0f, 1.0f, 0x33ffffffU);
+            View::paint(p);
+        }
+    };
+
+    class VideoScrubber final : public ui::View {
+    public:
+        std::function<void(int64_t ms)> onSeek;
+        std::function<void(int64_t ms)> onScrubbing;
+
+        VideoScrubber() {
+            style().height(24).noShrink();
+            setCursor(plat::Cursor::Hand);
+        }
+
+        void setDuration(int64_t ms) {
+            _durationMs = std::max<int64_t>(1, ms);
+            update();
+        }
+
+        void setPosition(int64_t ms) {
+            if (!_dragging) {
+                _positionMs = std::clamp<int64_t>(ms, 0, _durationMs);
+                update();
+            }
+        }
+
+        bool isDragging() const { return _dragging; }
+
+        bool onEvent(ui::Event &e) override {
+            if (e.type == ui::EventType::PointerDown && e.button == plat::Button::Left) {
+                _dragging = true;
+                seekToX(e.pos.x);
+                return true;
+            }
+            if (e.type == ui::EventType::PointerMove) {
+                if (_dragging) {
+                    seekToX(e.pos.x);
+                    return true;
+                }
+            }
+            if (e.type == ui::EventType::PointerUp || e.type == ui::EventType::PointerCancel) {
+                if (_dragging) {
+                    _dragging = false;
+                    seekToX(e.pos.x);
+                    if (onSeek)
+                        onSeek(_positionMs);
+                    return true;
+                }
+            }
+            return View::onEvent(e);
+        }
+
+        void paint(gfx::Painter &p) override {
+            const ui::RectF b = bounds();
+            if (b.w <= 0 || b.h <= 0)
+                return;
+
+            const float trackH   = 4.0f;
+            const float trackY   = std::floor((b.h - trackH) / 2.0f);
+            const double frac    = std::clamp(double(_positionMs) / double(_durationMs), 0.0, 1.0);
+            const float  playedW = std::floor(float(b.w * frac));
+
+            // Track background
+            p.fillRoundRect({0, trackY, b.w, trackH}, trackH / 2.0f, 0x40ffffffU);
+
+            // Played progress fill
+            if (playedW > 0)
+                p.fillRoundRect({0, trackY, playedW, trackH}, trackH / 2.0f, ui::color(C::Accent));
+
+            // Thumb knob circle
+            const float knobX = std::clamp(playedW, 6.0f, b.w - 6.0f);
+            const float knobY = trackY + trackH / 2.0f;
+            p.fillCircle({knobX, knobY}, 6.0f, 0xffffffffU);
+        }
+
+    private:
+        void seekToX(float x) {
+            const float w = width();
+            if (w <= 0)
+                return;
+            const float frac = std::clamp(x / w, 0.0f, 1.0f);
+            _positionMs = int64_t(std::llround(double(frac) * double(_durationMs)));
+            update();
+            if (onScrubbing)
+                onScrubbing(_positionMs);
+        }
+
+        int64_t _durationMs = 1;
+        int64_t _positionMs = 0;
+        bool    _dragging   = false;
+    };
+
+    class MuteButton final : public IconButton {
+    public:
+        std::function<void(float delta)> onVolume;
+
+        MuteButton() : IconButton(gfx::Icon::Headphones, 20, C::TooltipText) {
+            style().size(36, 36).noShrink();
+            setTooltip(tr("Mute"));
+            setFocusable(false);
+            setCursor(plat::Cursor::Hand);
+        }
+
+        void setMuted(bool muted) {
+            _muted = muted;
+            setTooltip(_muted ? tr("Unmute") : tr("Mute"));
+            update();
+        }
+
+        bool onEvent(ui::Event &e) override {
+            if (e.type == ui::EventType::Scroll && onVolume) {
+                onVolume(e.dy > 0 ? 0.05f : -0.05f);
+                return true;
+            }
+            return IconButton::onEvent(e);
+        }
+
+        void paint(gfx::Painter &p) override {
+            if (hovered())
+                p.fillRoundRect(bounds(), 18, 0x26ffffffU);
+            paintIcon(p);
+            if (_muted) {
+                const ui::RectF b = bounds();
+                p.drawLine({b.x + 9, b.y + b.h - 9}, {b.x + b.w - 9, b.y + 9}, 2.0f, 0xeeef4444U);
+            }
+        }
+
+    private:
+        bool _muted = false;
+    };
+
+    class Splitter final : public ui::View {
+    public:
+        static constexpr float kW = 6.0f;
+        std::function<void(float startW, float delta)> onDrag;
+        std::function<float()> currentW;
+
+        Splitter() {
+            setCursor(plat::Cursor::ResizeH);
+            setHoverRepaint(true);
+        }
+
+        bool onEvent(ui::Event &e) override {
+            if (e.type == ui::EventType::PointerDown && e.button == plat::Button::Left) {
+                _startX = e.windowPos.x;
+                _startW = currentW ? currentW() : 0.0f;
+                return true;
+            }
+            if (e.type == ui::EventType::PointerMove) {
+                if (window() && window()->capture() == this && onDrag) {
+                    const float delta = _startX - e.windowPos.x;
+                    onDrag(_startW, delta);
+                }
+                return true;
+            }
+            if (e.type == ui::EventType::PointerUp || e.type == ui::EventType::PointerCancel) {
+                return true;
+            }
+            return View::onEvent(e);
+        }
+
+        void paint(gfx::Painter &p) override {
+            const float lineX = std::floor(width() / 2.0f);
+            if (hovered())
+                p.drawLine({lineX, 0}, {lineX, height()}, 2.0f, ui::color(C::Link));
+            else
+                p.drawLine({lineX, 0}, {lineX, height()}, 1.0f, ui::color(C::Border));
+        }
+
+    private:
+        float _startX = 0.0f;
+        float _startW = 0.0f;
+    };
+
     // A round button on the dark bar: 20-px onDark icon, a white wash on hover.
     class ViewerButton final : public IconButton {
     public:
@@ -247,15 +810,240 @@ private:
             setFocusable(false);
             setCursor(plat::Cursor::Hand);
         }
+        void setActive(bool active) {
+            if (_active != active) {
+                _active = active;
+                update();
+            }
+        }
+        bool active() const { return _active; }
         void paint(gfx::Painter &p) override {
-            if (hovered())
+            if (_active)
+                p.fillRoundRect(bounds(), 18, 0x4dffffffU);
+            else if (hovered())
                 p.fillRoundRect(bounds(), 18, 0x26ffffffU);
             paintIcon(p);
         }
+
+    private:
+        bool _active = false;
     };
-    ui::RectF imageRect() const {
+
+    class NavButton final : public IconButton {
+    public:
+        NavButton(gfx::Icon icon, std::string tip) : IconButton(icon, 24, C::TooltipText) {
+            style().size(44, 44).noShrink();
+            setTooltip(std::move(tip));
+            setFocusable(false);
+            setCursor(plat::Cursor::Hand);
+        }
+        void paint(gfx::Painter &p) override {
+            p.fillRoundRect(bounds(), 22, hovered() ? 0x99000000U : 0x66000000U);
+            paintIcon(p);
+        }
+    };
+
+    void ensureVideoPlayer() {
+        if (_videoPlayer)
+            return;
+        plat::Window *pw = nullptr;
+        if (window())
+            pw = &window()->native();
+        else if (_list && _list->window())
+            pw = &_list->window()->native();
+        if (pw) {
+            _videoPlayer = plat::video::VideoPlayer::create(pw);
+            setupVideoCallbacks();
+        }
+    }
+
+    void setupVideoCallbacks() {
+        if (!_videoPlayer)
+            return;
+
+        _videoPlayer->onLoaded = [this] {
+            if (_file.isVideo() && _videoPlayer) {
+                _videoPlayerReady = true;
+                int64_t dur = _videoPlayer->durationMs();
+                if (dur <= 0)
+                    dur = _file.durationMs;
+                if (_scrubber)
+                    _scrubber->setDuration(dur);
+                updateTimecode(_videoPlayer->positionMs(), dur);
+                invalidateLayout();
+                update();
+            }
+        };
+
+        _videoPlayer->onPosition = [this](int64_t ms) {
+            if (_file.isVideo() && _videoPlayer) {
+                if (_scrubber && !_scrubber->isDragging())
+                    _scrubber->setPosition(ms);
+                int64_t dur = _videoPlayer->durationMs();
+                if (dur <= 0)
+                    dur = _file.durationMs;
+                updateTimecode(ms, dur);
+            }
+        };
+
+        _videoPlayer->onEnded = [this] {
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Play);
+                _videoPlayBtn->setTooltip(tr("Play"));
+            }
+            if (_videoPlayer)
+                _videoPlayer->pause();
+            update();
+        };
+
+        _videoPlayer->onFailed = [this](int) {
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Play);
+                _videoPlayBtn->setTooltip(tr("Play"));
+            }
+            update();
+        };
+    }
+
+    void loadCurrentVideo() {
+        if (!_videoPlayer || !_file.isVideo())
+            return;
+
+        _videoPlayerReady = false;
+        _videoPlayer->setVisible(false);
+        if (_videoPlayBtn) {
+            _videoPlayBtn->setIcon(gfx::Icon::Play);
+            _videoPlayBtn->setTooltip(tr("Play"));
+        }
+        updateTimecode(0, _file.durationMs);
+        if (_scrubber) {
+            _scrubber->setDuration(_file.durationMs);
+            _scrubber->setPosition(0);
+        }
+
+        const std::string &source = _file.source();
+        if (source.empty())
+            return;
+
+        if (!RemoteImages::isRemote(source)) {
+            const std::string local = str::startsWith(source, "file://") ? file::fromFileUrl(source) : source;
+            _videoPlayer->load(local);
+            _videoPlayer->play();
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Pause);
+                _videoPlayBtn->setTooltip(tr("Pause"));
+            }
+            return;
+        }
+
+        const std::string cache = identity::cacheDir(_ctx.app.platform());
+        std::string safeName = _file.name.empty() ? std::string("video.mp4") : _file.name;
+        for (char &c : safeName) {
+            if (std::strchr("\\/:*?\"<>|", c))
+                c = '_';
+        }
+        const std::string localPath = file::join(cache, "video/" + _file.id + "-" + safeName);
+
+        if (file::size(localPath) > 0) {
+            _videoPlayer->load(localPath);
+            _videoPlayer->play();
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Pause);
+                _videoPlayBtn->setTooltip(tr("Pause"));
+            }
+            return;
+        }
+
+        const size_t targetIndex = _currentIndex;
+        file::makeDirs(file::dirName(localPath));
+        const int job = model::jobs().begin(arg(tr("Downloading %1"), _file.name));
+        fetchFile(
+            _ctx.app.platform(),
+            _ctx.backend,
+            source,
+            localPath,
+            [this, alive = std::weak_ptr<char>(_alive), targetIndex, localPath, job](bool ok, const std::string &err) {
+                model::jobs().end(job);
+                if (alive.expired())
+                    return;
+                if (!ok) {
+                    LOG_WARN("messages", "Video download failed: %s", err.c_str());
+                    if (_thumb)
+                        _thumb->setLoadingText(tr("Download failed"), C::OnDarkDim);
+                    return;
+                }
+                if (_currentIndex == targetIndex && _file.isVideo() && _videoPlayer) {
+                    _videoPlayer->load(localPath);
+                    _videoPlayer->play();
+                    if (_videoPlayBtn) {
+                        _videoPlayBtn->setIcon(gfx::Icon::Pause);
+                        _videoPlayBtn->setTooltip(tr("Pause"));
+                    }
+                }
+            }
+        );
+    }
+
+    void togglePlayPause() {
+        if (!_videoPlayer || !_file.isVideo())
+            return;
+        if (_videoPlayer->isPlaying()) {
+            _videoPlayer->pause();
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Play);
+                _videoPlayBtn->setTooltip(tr("Play"));
+            }
+        } else {
+            int64_t pos = _videoPlayer->positionMs();
+            int64_t dur = _videoPlayer->durationMs();
+            if (dur > 0 && pos >= dur - 200) {
+                _videoPlayer->seek(0);
+            }
+            _videoPlayer->play();
+            if (_videoPlayBtn) {
+                _videoPlayBtn->setIcon(gfx::Icon::Pause);
+                _videoPlayBtn->setTooltip(tr("Pause"));
+            }
+        }
+        update();
+    }
+
+    void toggleMute() {
+        if (!_videoPlayer || !_file.isVideo())
+            return;
+        _isMuted = !_isMuted;
+        _videoPlayer->setMuted(_isMuted);
+        if (_muteBtn)
+            _muteBtn->setMuted(_isMuted);
+        update();
+    }
+
+    static std::string formatTime(int64_t ms) {
+        if (ms < 0)
+            ms = 0;
+        int64_t s = ms / 1000;
+        int64_t m = s / 60;
+        s %= 60;
+        int64_t h = m / 60;
+        m %= 60;
+        char buf[32];
+        if (h > 0)
+            snprintf(buf, sizeof(buf), "%lld:%02lld:%02lld", (long long)h, (long long)m, (long long)s);
+        else
+            snprintf(buf, sizeof(buf), "%02lld:%02lld", (long long)m, (long long)s);
+        return buf;
+    }
+
+    void updateTimecode(int64_t posMs, int64_t durMs) {
+        if (_timeLabel) {
+            _timeLabel->setText(formatTime(posMs) + " / " + formatTime(durMs));
+        }
+    }
+
+    ui::RectF imageRect(float stageW, float bottomReserve = 0.0f) const {
         const ui::RectF avail{
-            kMargin, kBarH + kMargin / 2, width() - 2 * kMargin, height() - kBarH - kMargin * 1.5f
+            kMargin, kBarH + kMargin / 2, stageW - 2 * kMargin,
+            height() - kBarH - kMargin * 1.5f - bottomReserve
         };
         if (avail.w <= 0 || avail.h <= 0)
             return {};
@@ -269,16 +1057,45 @@ private:
         w             = std::floor(w * s);
         h             = std::floor(h * s);
         return {
-            avail.x + std::floor((avail.w - w) / 2), avail.y + std::floor((avail.h - h) / 2), w, h
+            avail.x + std::floor((avail.w - w) / 2),
+            avail.y + std::floor((avail.h - h) / 2),
+            w,
+            h
         };
     }
 
-    Context     &_ctx;
-    MessageList *_list;
-    Ts           _ts;
-    model::File  _file;
-    ui::View    *_bar   = nullptr;
-    CachedImage *_thumb = nullptr, *_full = nullptr;
+    Context                                   &_ctx;
+    MessageList                               *_list             = nullptr;
+    std::vector<ViewerItem>                    _items;
+    size_t                                     _currentIndex     = 0;
+    Ts                                         _ts               = 0;
+    model::File                                _file;
+    ui::View                                  *_bar              = nullptr;
+    ui::Label                                 *_nameLabel        = nullptr;
+    ViewerButton                              *_downloadBtn      = nullptr;
+    ViewerButton                              *_forwardBtn       = nullptr;
+    ViewerButton                              *_browserBtn       = nullptr;
+    ViewerButton                              *_moreBtn          = nullptr;
+    ViewerButton                              *_threadBtn        = nullptr;
+    NavButton                                 *_prevBtn          = nullptr;
+    NavButton                                 *_nextBtn          = nullptr;
+    ThreadPanel                               *_threadPanel      = nullptr;
+    shell::TypingIndicator                   *_typing           = nullptr;
+    shell::Composer                          *_composer         = nullptr;
+    Splitter                                 *_splitter         = nullptr;
+    float                                     _threadW          = 420.0f;
+    CachedImage                               *_thumb            = nullptr, *_full = nullptr;
+    bool                                       _showThread       = false;
+    std::shared_ptr<char>                      _alive            = std::make_shared<char>();
+    std::unique_ptr<plat::video::VideoPlayer>  _videoPlayer;
+    bool                                       _videoPlayerReady = false;
+    bool                                       _isMuted          = false;
+    float                                      _volume           = 1.0f;
+    VideoControlsBar                          *_controlsBar      = nullptr;
+    ViewerButton                              *_videoPlayBtn     = nullptr;
+    ui::Label                                 *_timeLabel        = nullptr;
+    VideoScrubber                             *_scrubber         = nullptr;
+    MuteButton                                *_muteBtn          = nullptr;
 };
 
 // A label's text in window coordinates, not clipped by the list: in a message
@@ -2693,8 +3510,78 @@ void MessageList::toggleUnfurl(Ts ts, int attachment) {
 }
 
 void MessageList::openFileViewer(Ts ts, const std::string &path) {
-    if (const model::File *f = anyFileAt(message(ts), path); f && window())
-        showFileViewer(_ctx, *window(), this, ts, *f);
+    if (!window())
+        return;
+    std::vector<ViewerItem> items;
+    size_t                  initialIndex = 0;
+    bool                    foundTarget  = false;
+
+    // Scan all loaded messages in _items (the active conversation / channel / thread)
+    for (const Item &it : _items) {
+        if (it.kind != ItemKind::Message)
+            continue;
+        const model::Message *m = message(it.ts);
+        if (!m)
+            continue;
+        for (const model::File &f : m->files()) {
+            if (f.hasPreview()) {
+                if (it.ts == ts && f.path == path) {
+                    initialIndex = items.size();
+                    foundTarget  = true;
+                }
+                items.push_back({it.ts, f});
+            }
+        }
+        for (const model::Attachment &a : m->attachments()) {
+            for (const model::File &f : a.files) {
+                if (f.hasPreview()) {
+                    if (it.ts == ts && f.path == path) {
+                        initialIndex = items.size();
+                        foundTarget  = true;
+                    }
+                    items.push_back({it.ts, f});
+                }
+            }
+        }
+    }
+
+    // Fallback if target was not found in _items (e.g. pending or standalone message)
+    if (!foundTarget) {
+        items.clear();
+        initialIndex = 0;
+        const model::Message *m = message(ts);
+        if (m) {
+            for (const model::File &f : m->files()) {
+                if (f.hasPreview()) {
+                    if (f.path == path) {
+                        initialIndex = items.size();
+                        foundTarget  = true;
+                    }
+                    items.push_back({ts, f});
+                }
+            }
+            for (const model::Attachment &a : m->attachments()) {
+                for (const model::File &f : a.files) {
+                    if (f.hasPreview()) {
+                        if (f.path == path) {
+                            initialIndex = items.size();
+                            foundTarget  = true;
+                        }
+                        items.push_back({ts, f});
+                    }
+                }
+            }
+        }
+    }
+
+    if (items.empty()) {
+        if (const model::File *f = anyFileAt(message(ts), path))
+            items.push_back({ts, *f});
+        else
+            return;
+    }
+
+    showFileViewer(_ctx, *window(), this, std::move(items), initialIndex);
 }
 
 void MessageList::openCanvas(const model::File &f) {
@@ -2803,8 +3690,21 @@ void MessageList::openHtmlFile(const model::File &f) {
 }
 
 ui::Popup *
+showFileViewer(
+    Context                &ctx,
+    ui::Window             &w,
+    MessageList            *list,
+    std::vector<ViewerItem> items,
+    size_t                  initialIndex
+) {
+    if (items.empty())
+        return nullptr;
+    return w.showPopup(std::make_unique<FileViewer>(ctx, list, std::move(items), initialIndex));
+}
+
+ui::Popup *
 showFileViewer(Context &ctx, ui::Window &w, MessageList *list, Ts ts, const model::File &f) {
-    return w.showPopup(std::make_unique<FileViewer>(ctx, list, ts, f));
+    return showFileViewer(ctx, w, list, std::vector<ViewerItem>{{ts, f}}, 0);
 }
 
 } // namespace screens

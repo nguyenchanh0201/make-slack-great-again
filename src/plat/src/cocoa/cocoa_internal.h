@@ -170,6 +170,7 @@ public:
     void  viewResized();       // frame size changed
     void  backingChanged();    // backingScaleFactor / screen changed
     void  deliverFrameIfDue(); // display link tick or fallback timer
+    void  recreateDisplayLink(); // display / wake recovery
     void  stateMaybeChanged(); // zoom / miniaturize / fullscreen notifications
     void  applyCursor();       // the pointer is over us: make _cursor current
     void  pointerLeft();

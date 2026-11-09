@@ -11,6 +11,7 @@ set(PLAT_COCOA_SOURCES
     src/cocoa/cocoa_tray.mm
     src/cocoa/cocoa_notify.mm
     src/cocoa/cocoa_services.mm
+    src/cocoa/cocoa_video.mm
 )
 target_sources(plat PRIVATE ${PLAT_COCOA_SOURCES})
 set_source_files_properties(${PLAT_COCOA_SOURCES} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -31,4 +32,5 @@ target_link_libraries(plat PUBLIC
     "-framework ImageIO"
     "-framework Network"
     "-framework CoreServices"
+    "-framework CoreMedia"
 )

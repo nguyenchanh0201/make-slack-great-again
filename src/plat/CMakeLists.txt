@@ -23,6 +23,7 @@ add_library(plat STATIC
     src/core/strings.cpp
     src/core/wire.cpp
     src/core/drop.cpp
+    src/core/video_stub.cpp
 )
 target_include_directories(plat PUBLIC include PRIVATE src)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

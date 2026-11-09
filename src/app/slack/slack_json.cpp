@@ -572,6 +572,8 @@ File toFile(const Value &o) {
     f.width      = int32_t(o["original_w"].integer(o["thumb_360_w"].integer()));
     f.height     = int32_t(o["original_h"].integer(o["thumb_360_h"].integer()));
     f.durationMs = o["duration_ms"].integer();
+    if (f.durationMs == 0 && o.has("duration"))
+        f.durationMs = int64_t(o["duration"].number() * 1000);
     // The original: url_private_download (a voice clip's own bytes, not the
     // transcode), else url_private.
     f.original   = owned(o["url_private_download"]);
@@ -583,6 +585,20 @@ File toFile(const Value &o) {
                 f.path = std::string(t);
                 break;
             }
+    if (f.isVideo()) {
+        static const char *const kVideoThumbs[] = {
+            "thumb_video", "thumb_720", "thumb_960", "thumb_1024", "thumb_480", "thumb_360", "thumb_160"
+        };
+        for (const char *key : kVideoThumbs)
+            if (const std::string_view t = o[key].str(); !t.empty()) {
+                f.thumb = std::string(t);
+                break;
+            }
+        if (f.width == 0) {
+            f.width  = int32_t(o["thumb_video_w"].integer(o["thumb_720_w"].integer(o["thumb_360_w"].integer())));
+            f.height = int32_t(o["thumb_video_h"].integer(o["thumb_720_h"].integer(o["thumb_360_h"].integer())));
+        }
+    }
     if (f.width == 0 && o.has("thumb_pdf")) {
         // A PDF's preview: the server-rendered first page.
         f.thumb  = owned(o["thumb_pdf"]);

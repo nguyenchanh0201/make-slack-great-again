@@ -859,6 +859,7 @@ Shell::Shell(
     shortcuts::setCtrlEnterSends(settings.ctrlEnterSends);
     setMarkdownFormatting(settings.markdownFormatting);
     _drafts.setStoreOf([this](const std::string &key) { return storeFor(key); });
+    ctx.drafts           = &_drafts;
     ctx.openConversation = [this](ConvRef c) { open(c); };
     ctx.openThread       = [this](ConvRef c, Ts root) { openThread(c, root); };
     ctx.closeThread      = [this] { closeThread(); };

@@ -102,6 +102,64 @@ public:
         _tile = true;
         setLoadingText({}, C::FormTextFaint);
     }
+    void setVideo(int64_t durationMs) {
+        _isVideo    = true;
+        _durationMs = durationMs;
+    }
+    void styleChanged() override {
+        _durationLayout.reset();
+        CachedImage::styleChanged();
+    }
+    void paint(gfx::Painter &p) override {
+        CachedImage::paint(p);
+        if (!_isVideo)
+            return;
+        const ui::RectF r = bounds();
+        if (r.w <= 0 || r.h <= 0)
+            return;
+
+        // Centered Play button circle + icon
+        const float btnSize = std::clamp(std::min(r.w, r.h) * 0.28f, 32.0f, 52.0f);
+        const float cx      = r.w / 2.0f, cy = r.h / 2.0f;
+        p.fillCircle({cx, cy}, btnSize / 2.0f, 0xb3000000U);
+        const float iconSize = std::floor(btnSize * 0.48f);
+        const float ix       = cx - iconSize / 2.0f + 1.0f;
+        const float iy       = cy - iconSize / 2.0f;
+        gfx::drawIcon(p, gfx::Icon::Play, {ix, iy, iconSize, iconSize}, 0xffffffffU);
+
+        // Duration badge pill at bottom-right
+        if (_durationMs > 0) {
+            if (!_durationLayout) {
+                int64_t s = _durationMs / 1000;
+                int64_t m = s / 60;
+                s %= 60;
+                int64_t h = m / 60;
+                m %= 60;
+                char buf[32];
+                if (h > 0)
+                    snprintf(buf, sizeof(buf), "%lld:%02lld:%02lld", (long long)h, (long long)m, (long long)s);
+                else
+                    snprintf(buf, sizeof(buf), "%02lld:%02lld", (long long)m, (long long)s);
+                _durationLayout = text::layoutPlain(
+                    buf,
+                    ui::pxFont(11, text::Weight::Semibold, 0xffffffffU),
+                    windowScale()
+                );
+            }
+            if (_durationLayout) {
+                const float padH   = 6.0f, padV = 2.0f;
+                const float pillW  = _durationLayout->width() + padH * 2.0f;
+                const float pillH  = _durationLayout->height() + padV * 2.0f;
+                const float margin = 8.0f;
+                const float px     = r.w - pillW - margin;
+                const float py     = r.h - pillH - margin;
+                if (px >= 0 && py >= 0) {
+                    p.fillRoundRect({px, py, pillW, pillH}, 4.0f, 0xb3000000U);
+                    _durationLayout->paint(p, snapPx({px + padH, py + padV}));
+                }
+            }
+        }
+    }
     // A file's preview: the viewer opens on the file (with its actions),
     // the file bar names it by `key` (its path; a PDF shows its thumb).
     std::function<void()> onOpen;
@@ -148,8 +206,11 @@ private:
     Ts           _ts; // the message (0: no file menu)
     int          _w, _h;
     float        _dw, _dh;
-    bool         _file;
-    bool         _tile = false;
+    bool                          _file;
+    bool                          _tile       = false;
+    bool                          _isVideo    = false;
+    int64_t                       _durationMs = 0;
+    std::unique_ptr<text::Layout> _durationLayout;
 };
 
 // A picture shown inline (a canvas is a card).
@@ -1468,7 +1529,7 @@ void MessageRow::buildGallery(ui::View *col, const std::vector<const model::File
     auto *g = col->add<Gallery>();
     g->style().alignSelf(Align::Start).margins(0, 6, 0, 2);
     for (const model::File *f : files) {
-        const std::string &src = f->isImage() ? f->path : f->thumb;
+        const std::string &src = f->isImage() ? f->path : (!f->thumb.empty() ? f->thumb : f->path);
         auto              *t   = g->add<Thumb>(
             _list,
             src,
@@ -1482,6 +1543,8 @@ void MessageRow::buildGallery(ui::View *col, const std::vector<const model::File
         );
         t->setShape(ImageCache::Shape::Rounded, 8);
         t->setTile();
+        if (f->isVideo())
+            t->setVideo(f->durationMs);
         const Ts          msg  = _ts;
         const std::string path = f->path;
         t->key                 = path;
@@ -1503,13 +1566,16 @@ void MessageRow::buildFile(ui::View *col, const model::File &f, Ts ts) {
         auto *name = ui::styledLabel(col, f.name, st, 1);
         name->style().height(14).margins(0, 6, 0, 0);
         name->setLineHeight(1.0f);
+        const std::string &src = f.isImage() ? f.path : (!f.thumb.empty() ? f.thumb : f.path);
         auto             *img  = static_cast<Thumb *>(addThumb(
-            col, f.isImage() ? f.path : f.thumb, f.width, f.height, kImgMaxW, kImgMaxH, 0, true
+            col, src, f.width, f.height, kImgMaxW, kImgMaxH, 0, true
         ));
         const Ts          msg  = _ts;
         const std::string path = f.path;
         img->key               = path;
         img->setTs(ts);
+        if (f.isVideo())
+            img->setVideo(f.durationMs);
         img->onOpen = [this, msg, path] { _list.openFileViewer(msg, path); };
         return;
     }

@@ -1227,12 +1227,26 @@ replaceEffectiveText(const EffectiveState &st, bool marked, NSRange range, std::
     if (_owner)
         _owner->stateMaybeChanged(); // zoom has no notification of its own
 }
+- (void)windowDidChangeScreen:(NSNotification *)n {
+    if (_owner) {
+        _owner->recreateDisplayLink();
+        _owner->requestFrame();
+    }
+}
+- (void)windowDidChangeScreenProfile:(NSNotification *)n {
+    if (_owner) {
+        _owner->recreateDisplayLink();
+        _owner->requestFrame();
+    }
+}
 - (void)windowDidChangeOcclusionState:(NSNotification *)n {
     // Display links stop while occluded; a Frame asked for meanwhile is
     // owed now.
-    if (_owner && (_owner->window.occlusionState & NSWindowOcclusionStateVisible) &&
-        _owner->framePending)
-        _owner->requestFrame();
+    if (_owner && (_owner->window.occlusionState & NSWindowOcclusionStateVisible)) {
+        _owner->recreateDisplayLink();
+        if (_owner->framePending)
+            _owner->requestFrame();
+    }
 }
 @end
 
@@ -1610,9 +1624,30 @@ void CocoaWindow::requestFrame() {
     startFrameClock();
 }
 
+void CocoaWindow::recreateDisplayLink() {
+    if (@available(macOS 14.0, *)) {
+        if (_displayLink) {
+            [(CADisplayLink *)_displayLink invalidate];
+            _displayLink = nil;
+        }
+        if (view && _frameTarget) {
+            CADisplayLink *link = [view displayLinkWithTarget:_frameTarget selector:@selector(tick:)];
+            if (link) {
+                [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+                link.paused  = !framePending;
+                _displayLink = link;
+            }
+        }
+    }
+}
+
 void CocoaWindow::startFrameClock() {
-    if (@available(macOS 14.0, *))
-        ((CADisplayLink *)_displayLink).paused = NO;
+    if (@available(macOS 14.0, *)) {
+        if (_displayLink)
+            ((CADisplayLink *)_displayLink).paused = NO;
+        else
+            recreateDisplayLink();
+    }
     // The display link does not tick for a window that is not on a live
     // display (screen asleep, locked session) or before macOS 14; the
     // fallback timer covers those so a requested Frame always arrives.

@@ -22,6 +22,9 @@ class Service; // app/llm/service.h
 namespace media {
 class AudioPlayer; // app/media/audio_player.h
 }
+namespace shell {
+class DraftStash; // app/screens/shell/composer.h
+}
 
 namespace screens {
 
@@ -94,6 +97,8 @@ struct Context {
     // Settings opened on its AI assistance page (the Summarize notice's
     // "Open settings"). Set by the shell.
     std::function<void()>                                            openAiSettings;
+    // Centralized draft stash (channel and thread composers share it). Set by the shell.
+    shell::DraftStash                                               *drafts = nullptr;
 
     // Agent thread links (a Slack thread answered by a Claude Code session):
     // what the hover toolbar's robot and the message menu offer for a

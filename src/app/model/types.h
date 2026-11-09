@@ -114,9 +114,10 @@ struct File {
 
     bool isImage() const { return mime.compare(0, 6, "image/") == 0 && width > 0; }
     bool isAudio() const { return mime.compare(0, 6, "audio/") == 0 || subtype == "slack_audio"; }
+    bool isVideo() const { return mime.compare(0, 6, "video/") == 0 || subtype == "slack_video"; }
     bool isPdf() const { return mime == "application/pdf"; }
     // A picture to show inline (an image, a PDF's page).
-    bool hasPreview() const { return isImage() || (isPdf() && !thumb.empty() && width > 0); }
+    bool hasPreview() const { return isImage() || isVideo() || (isPdf() && !thumb.empty() && width > 0); }
     // Slack canvases (quip docs): a preview card, opened in the canvas viewer.
     bool isCanvas() const { return mime == "application/vnd.slack-docs"; }
     bool isHtml() const;

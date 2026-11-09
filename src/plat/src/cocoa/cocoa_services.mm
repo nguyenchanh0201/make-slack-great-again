@@ -34,6 +34,7 @@
 
 using plat::EventType;
 using plat::cocoa::CocoaApp;
+using plat::cocoa::CocoaWindow;
 
 // One target for every notification and Apple Event this file listens to.
 @interface                                          PlatServicesObserver : NSObject
@@ -49,6 +50,10 @@ using plat::cocoa::CocoaApp;
 - (void)screensChanged:(NSNotification *)n {
     if (!_owner)
         return;
+    for (CocoaWindow *w : _owner->windows) {
+        w->recreateDisplayLink();
+        w->requestFrame();
+    }
     _owner->emitEvent({.type = EventType::MonitorsChanged});
     _owner->noteWork();
 }
@@ -362,6 +367,12 @@ void CocoaApp::tearDownServices() {
 }
 
 void CocoaApp::onSystemEvent(EventType t) {
+    if (t == EventType::Resumed) {
+        for (CocoaWindow *w : windows) {
+            w->recreateDisplayLink();
+            w->requestFrame();
+        }
+    }
     emit({.type = t});
     noteWork();
 }

@@ -57,12 +57,26 @@ class MessageList;
 // The link menu (Open link, Copy link) at a window point.
 void showLinkMenu(Context &ctx, ui::Window &w, ui::PointF at, const std::string &url);
 
+struct ViewerItem {
+    Ts          ts = 0;
+    model::File file;
+};
+
 // The file viewer: the picture (an image, a PDF's
 // page) on the viewer backdrop under a bar with the name and Download,
 // Forward, Open in browser, More actions and Close; Escape or a click on the
 // backdrop closes it. `list` gets the actions (null: Close only).
 ui::Popup *
 showFileViewer(Context &ctx, ui::Window &w, MessageList *list, Ts ts, const model::File &f);
+
+ui::Popup *
+showFileViewer(
+    Context                &ctx,
+    ui::Window             &w,
+    MessageList            *list,
+    std::vector<ViewerItem> items,
+    size_t                  initialIndex = 0
+);
 
 class MessageList : public ui::View {
 public:
