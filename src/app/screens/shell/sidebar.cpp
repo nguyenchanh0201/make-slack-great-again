@@ -1071,7 +1071,9 @@ void Sidebar::rebuild() {
     for (ConvRef c = 0; c < store.conversationCount(); ++c) {
         const auto &cv = store.conversation(c);
         // left channels, closed or dead DMs
-        if (!cv.member || deadDm(store, cv) || inCustom[c] || closedHere(c))
+        // The open DM is listed even while its reopening is under way.
+        if ((!cv.member && !(c == _selected && cv.isDirect())) || deadDm(store, cv) ||
+            inCustom[c] || closedHere(c))
             continue;
         if (cv.starred)
             lists[0].push_back(c);

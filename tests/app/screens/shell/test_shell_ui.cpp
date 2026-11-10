@@ -428,6 +428,29 @@ TEST("sidebar: a DM closed here stays closed until a newer message, across resta
     CHECK_FALSE(h.sidebar().closed().count(id));
 }
 
+TEST("sidebar: a closed DM or app opened from elsewhere is listed again, and stays") {
+    Harness      h;
+    Conversation c; // an app's DM, as found in search or the switcher
+    c.id     = "D0BOT";
+    c.kind   = ConvKind::Dm;
+    c.dmUser = h.store.findUser("U0DEPLOY");
+    h.store.addConversation(std::move(c));
+    h.sidebar().rebuild();
+    const ConvRef bot = h.conv("D0BOT");
+    REQUIRE(h.sidebar().closeRow(bot));
+    pump();
+    REQUIRE(!h.sidebar().rowState(bot).exists);
+    h.sh->open(bot);
+    pump();
+    CHECK(h.sidebar().rowState(bot).exists); // at once, while it reopens
+    for (int i = 0; i < 100 && !h.store.conversation(bot).member; ++i)
+        app().pump(5);
+    CHECK(h.store.conversation(bot).member); // conversations.open
+    h.sh->open(h.conv("C0DESIGN"));          // left: still listed
+    pump();
+    CHECK(h.sidebar().rowState(bot).exists);
+}
+
 TEST("sidebar: a DM's status emoji shows the status when hovered") {
     Harness       h;
     const ConvRef dm   = h.conv("D0MIRA");

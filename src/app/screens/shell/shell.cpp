@@ -1942,6 +1942,13 @@ void Shell::open(ConvRef conv) {
     _composerSuggestion = _ctx.backend.promptSuggestion(conv); // setTarget gave it
     applyComposerAccess();
     _typing->setTarget(conv, 0);
+    // A closed DM or app opened again (search, the switcher, a link): open it
+    // on the service too, so it stays listed. shortcut: 1:1 only (openDm),
+    // a closed group DM shows while open; reopen it there if that matters.
+    if (const auto &c = _ctx.store().conversation(conv);
+        !c.member && c.kind == model::ConvKind::Dm && c.dmUser != model::kNoUser &&
+        !_ctx.backend.isAgentSession(conv))
+        _ctx.backend.openDm(c.dmUser, nullptr);
     _sidebar->select(conv);
     showCanvas(false);
     updateHeader();
