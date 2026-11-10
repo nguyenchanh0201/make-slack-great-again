@@ -348,6 +348,7 @@ TEST("sidebar: a closed DM that opens again comes back at the top of its section
     pump();
     CHECK_FALSE(h.sidebar().rowState(last).exists);
     h.store.updateConversation(last, [](Conversation &c) { c.member = true; }); // conversations.open
+    h.sidebar().select(last); // and opened
     pump();
     CHECK(firstDm() == last);
     // Open again after another one comes back: the latest is on top.
@@ -355,6 +356,7 @@ TEST("sidebar: a closed DM that opens again comes back at the top of its section
     REQUIRE(h.sidebar().closeRow(other));
     pump();
     h.store.updateConversation(other, [](Conversation &c) { c.member = true; });
+    h.sidebar().select(other);
     pump();
     CHECK(firstDm() == other);
 }
@@ -390,6 +392,55 @@ TEST("sidebar: a conversation with a draft shows a pen with its text, not the op
     h.sidebar().select(dm); // open: the composer has it
     pump();
     CHECK_STR(h.sidebar().rowState(dm).draft, "");
+}
+
+TEST("sidebar: a DM closed here stays closed until a newer message, across restarts") {
+    Harness              h;
+    std::vector<ConvRef> dms;
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).isDirect() && c != h.sidebar().selected())
+            dms.push_back(c);
+    REQUIRE(!dms.empty());
+    const ConvRef      dm = dms.back();
+    const std::string &id = h.store.conversation(dm).id;
+    REQUIRE(h.sidebar().closeRow(dm));
+    pump();
+    CHECK(h.sidebar().closed().count(id));
+    // A roster reload lists it open again: still hidden.
+    h.store.updateConversation(dm, [](Conversation &c) { c.member = true; });
+    pump();
+    CHECK_FALSE(h.sidebar().rowState(dm).exists);
+    // Restarted: the stamp comes back from the settings.
+    const shell::Sidebar::VisitStamps saved = h.sidebar().closed();
+    h.sidebar().setClosed({});
+    pump();
+    CHECK(h.sidebar().rowState(dm).exists);
+    h.sidebar().setClosed(saved);
+    pump();
+    CHECK_FALSE(h.sidebar().rowState(dm).exists);
+    // A message after the close brings it back (and drops the stamp).
+    h.store.updateConversation(dm, [&](Conversation &c) {
+        c.latest = (h.backend.nowSecs() + 60) * 1000000;
+        c.unread = 1;
+    });
+    pump();
+    CHECK(h.sidebar().rowState(dm).exists);
+    CHECK_FALSE(h.sidebar().closed().count(id));
+}
+
+TEST("sidebar: a DM's status emoji shows the status when hovered") {
+    Harness       h;
+    const ConvRef dm   = h.conv("D0MIRA");
+    model::User  &mira = h.store.user(h.store.findUser("U0MIRA"));
+    mira.statusEmoji   = "palm_tree";
+    mira.statusText    = "On vacation";
+    h.sidebar().rebuild();
+    pump();
+    CHECK_STR(h.sidebar().rowState(dm).status, "On vacation");
+    mira.statusText = ""; // no text: the emoji's name
+    h.sidebar().rebuild();
+    pump();
+    CHECK_STR(h.sidebar().rowState(dm).status, ":palm_tree:");
 }
 
 TEST("sidebar: a DM whose peer was deactivated is not listed") {

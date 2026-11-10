@@ -257,6 +257,16 @@ bool deadDm(const model::Store &store, const model::Conversation &c) {
 
 // ── Rows ────────────────────────────────────────────────────────────────────
 
+// A view with a fixed tooltip (a DM's status emoji: the status).
+template <class Base>
+class Tipped final : public Base {
+public:
+    template <class... A>
+    explicit Tipped(std::string t, A &&...a) : Base(std::forward<A>(a)...), tip(std::move(t)) {}
+    std::string tooltip() const override { return tip; }
+    std::string tip;
+};
+
 class SectionHeader final : public HoverRow {
 public:
     SectionHeader(Sidebar &sb, int k, Icon i, std::string text)
@@ -511,11 +521,16 @@ public:
                 screens::addTagBadge(this, true, true)->style().margins(6, 0, 0, 0);
             if (!u.statusEmoji.empty()) {
                 const model::Store::EmojiGlyph g = store.emojiFor(u.statusEmoji);
+                // Hovered, the status itself (its text, else the emoji's name).
+                std::string                    tip =
+                    u.statusText.empty() ? str::concat({":", u.statusEmoji, ":"}) : u.statusText;
                 if (!g.unicode.empty()) {
-                    auto *s = add<Label>(g.unicode, Font::Body);
+                    auto *s = add<Tipped<Label>>(std::move(tip), g.unicode, Font::Body);
+                    status  = s;
                     s->style().margins(4, 0, 0, 0).noShrink();
                 } else if (!g.image.empty()) {
-                    auto *s = add<Image>();
+                    auto *s = add<Tipped<Image>>(std::move(tip));
+                    status  = s;
                     s->style().size(15, 15).margins(4, 0, 0, 0).noShrink();
                     s->setFit(Image::Fit::Contain);
                     s->setBitmap(sb._avatars.get(g.image, 30));
@@ -702,6 +717,7 @@ public:
     HuddlePill    *huddle  = nullptr;
     HeaderButton  *close   = nullptr; // DMs and apps: shown on hover
     HeaderButton  *pen     = nullptr; // shown while it has a draft
+    ui::View      *status  = nullptr; // a DM peer's status emoji
     SectionHeader *section = nullptr;
     size_t         base    = 0; // its place in the section as listed (before the sort)
     bool           unread = false, dot = false;
@@ -835,6 +851,14 @@ Sidebar::Sidebar(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _avatars(
             if (ch.conv < _wasMember.size()) {
                 if (!_wasMember[ch.conv] && cv.member && cv.isDirect())
                     _reopenedAt[ch.conv] = _ctx.backend.nowSecs() * 1000000;
+                // Closed here: remembered, so a roster reload that lists it
+                // open again does not bring it back. shortcut: a close the
+                // service refused stays hidden here until its next message.
+                if (_wasMember[ch.conv] && !cv.member && cv.isDirect() && !cv.id.empty()) {
+                    _closed[cv.id] = _ctx.backend.nowSecs();
+                    if (onVisitedChanged)
+                        onVisitedChanged();
+                }
                 _wasMember[ch.conv] = cv.member;
             }
             // Under unreads-only a row comes or goes when its bold state
@@ -904,6 +928,11 @@ bool Sidebar::isApp(const model::Conversation &c) const {
 
 void Sidebar::setVisited(std::unordered_map<std::string, int64_t> stamps) {
     _visited = std::move(stamps);
+    rebuild();
+}
+
+void Sidebar::setClosed(VisitStamps stamps) {
+    _closed = std::move(stamps);
     rebuild();
 }
 
@@ -1011,6 +1040,20 @@ void Sidebar::rebuild() {
     // The user's own sections, under Starred: each lists its conversations
     // in its own order, like Starred regardless of the filters, and takes
     // them out of the other sections (Starred too).
+    // Closed here and nothing newer since: not listed (the open one is).
+    bool       closedChanged = false;
+    const auto closedHere    = [&](ConvRef c) {
+        const auto &cv = store.conversation(c);
+        const auto  it = _closed.find(cv.id);
+        if (it == _closed.end())
+            return false;
+        if (tsSecs(cv.latest) > it->second) { // a message since: open again
+            _closed.erase(it);
+            closedChanged = true;
+            return false;
+        }
+        return c != _selected;
+    };
     const bool                        own  = caps.customSections;
     const auto                       &secs = store.sections();
     std::vector<std::vector<ConvRef>> custom(own ? secs.size() : 0);
@@ -1021,12 +1064,14 @@ void Sidebar::rebuild() {
             if (c == kNoConv || inCustom[c])
                 continue;
             inCustom[c] = 1;
-            if (store.conversation(c).member && !deadDm(store, store.conversation(c)))
+            if (store.conversation(c).member && !deadDm(store, store.conversation(c)) &&
+                !closedHere(c))
                 custom[s].push_back(c);
         }
     for (ConvRef c = 0; c < store.conversationCount(); ++c) {
         const auto &cv = store.conversation(c);
-        if (!cv.member || deadDm(store, cv) || inCustom[c]) // left channels, closed or dead DMs
+        // left channels, closed or dead DMs
+        if (!cv.member || deadDm(store, cv) || inCustom[c] || closedHere(c))
             continue;
         if (cv.starred)
             lists[0].push_back(c);
@@ -1041,6 +1086,8 @@ void Sidebar::rebuild() {
         else
             hiddenCh.push_back(c);
     }
+    if (closedChanged && onVisitedChanged)
+        onVisitedChanged();
     _wasMember.resize(store.conversationCount());
     for (ConvRef c = 0; c < store.conversationCount(); ++c)
         _wasMember[c] = store.conversation(c).member;
@@ -1700,6 +1747,7 @@ void Sidebar::select(ConvRef conv) {
     if (conv < _ctx.store().conversationCount()) { // a visit keeps it relevant for the whole window
         if (const std::string &id = _ctx.store().conversation(conv).id; !id.empty()) {
             _visited[id] = _ctx.backend.nowSecs();
+            _closed.erase(id); // opened again
             if (onVisitedChanged)
                 onVisitedChanged();
         }
@@ -1766,6 +1814,8 @@ Sidebar::RowState Sidebar::rowState(ConvRef conv) const {
     s.badge    = r->count;
     s.selected = r->checked();
     s.huddle   = r->huddleCount;
+    if (r->status)
+        s.status = r->status->tooltip();
     if (r->pen->visible())
         s.draft = r->pen->tooltip();
     return s;

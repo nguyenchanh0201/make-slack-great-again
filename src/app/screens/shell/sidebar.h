@@ -108,6 +108,11 @@ public:
     void                  setVisited(VisitStamps stamps);
     const VisitStamps    &visited() const { return _visited; }
     void                  clearVisited(); // Settings → "Clear state"
+    // DMs and apps closed here (×, Close), and when: hidden until a newer
+    // message or opened again, whatever the service lists. Saved with the
+    // visit stamps (Settings::closedAt; onVisitedChanged fires).
+    void                  setClosed(VisitStamps stamps);
+    const VisitStamps    &closed() const { return _closed; }
     std::function<void()> onVisitedChanged;
     // Each section's sort by its key (sectionKey; defaults left out). The
     // shell keeps them per workspace and sets them on a switch;
@@ -133,6 +138,7 @@ public:
         int         badge  = 0;
         int         huddle = 0; // a live huddle's pill: its participant count (1 when none listed)
         std::string draft;      // the draft pen's tooltip ("" = no pen)
+        std::string status;     // the status emoji's tooltip ("" = no emoji)
     };
     RowState                 rowState(model::ConvRef conv) const;
     // Tests: how many times the rows were rebuilt, and a row's identity (the
@@ -267,6 +273,7 @@ private:
     ui::View                 *_activityRow = nullptr;
     Nav                       _navSelected = Nav::None;
     VisitStamps               _visited; // opened here (visit stamps)
+    VisitStamps               _closed;  // closed here: when (epoch secs)
     Sorts                     _sorts;
     Filters                   _filters;
     model::ConvRef            _selected        = model::kNoConv;

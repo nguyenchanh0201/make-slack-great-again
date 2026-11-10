@@ -105,6 +105,8 @@ struct Settings {
     // The sidebar's visit stamps: conversation id →
     // when it was last opened here (epoch secs); "Clear state" empties it.
     std::vector<std::pair<std::string, int64_t>> visitedAt;
+    // DMs and apps closed here, by conversation id: when (epoch secs).
+    std::vector<std::pair<std::string, int64_t>> closedAt;
     // The sidebar sections' sorts (SectionSort::encode, plain ones left
     // out), per workspace (auth::WorkspaceRecord::key) and section
     // (Sidebar::sectionKey).

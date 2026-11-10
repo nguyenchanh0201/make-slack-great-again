@@ -906,6 +906,7 @@ Shell::Shell(
     _sidebar->style().width(kListW).noShrink();
     // The visit stamps come back from the settings and go there again 1.5 s
     // after the last change (coalesced).
+    _sidebar->setClosed({_settings.closedAt.begin(), _settings.closedAt.end()});
     _sidebar->setVisited({_settings.visitedAt.begin(), _settings.visitedAt.end()});
     _sidebar->onVisitedChanged = [this] {
         _ctx.app.cancelTimer(_visitedTimer);
@@ -3700,6 +3701,8 @@ void Shell::storeVisited() {
         if (at >= horizon)
             _settings.visitedAt.emplace_back(id, at);
     std::sort(_settings.visitedAt.begin(), _settings.visitedAt.end()); // a stable file
+    _settings.closedAt.assign(_sidebar->closed().begin(), _sidebar->closed().end());
+    std::sort(_settings.closedAt.begin(), _settings.closedAt.end());
 }
 
 void Shell::loadSorts() {

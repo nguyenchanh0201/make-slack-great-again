@@ -275,6 +275,9 @@ void fromJson(const json::Value r, Settings &s) {
     for (const json::Value e : r["visitedAt"])
         if (!e.key().empty() && e.integer() > 0)
             s.visitedAt.emplace_back(std::string(e.key()), e.integer());
+    for (const json::Value e : r["closedAt"])
+        if (!e.key().empty() && e.integer() > 0)
+            s.closedAt.emplace_back(std::string(e.key()), e.integer());
     for (const json::Value e : r["sidebarSorts"])
         if (!e["section"].str().empty() && !e["sort"].str().empty())
             s.sidebarSorts.push_back(
@@ -359,6 +362,12 @@ std::string Settings::toFile() const {
     if (!visitedAt.empty()) {
         w.key("visitedAt").beginObject();
         for (const auto &[id, at] : visitedAt)
+            w.key(id).value(at);
+        w.endObject();
+    }
+    if (!closedAt.empty()) {
+        w.key("closedAt").beginObject();
+        for (const auto &[id, at] : closedAt)
             w.key(id).value(at);
         w.endObject();
     }
