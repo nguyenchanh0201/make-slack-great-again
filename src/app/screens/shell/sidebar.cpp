@@ -14,6 +14,7 @@
 #include "screens/shell/shell_text.h"
 #include "screens/shell/sidebar_footer.h"
 #include "screens/shell/teammate_page.h"
+#include "ui/textedit.h"
 
 #include <algorithm>
 #include <cmath>
@@ -526,6 +527,11 @@ public:
             }
         }
         add<View>()->style().flex(1);
+        // An unsent draft: a pen where the "×" goes (Slack's), its text the tooltip.
+        pen = add<HeaderButton>(Icon::Edit3, "");
+        pen->style().margins(6, 0, 0, 0);
+        pen->setVisible(false);
+        pen->onClick = [this] { onClick(); };
         // DMs, group DMs and apps: "×" on hover closes (hides) the
         // conversation, as the menu's Leave does; its next message brings it back.
         if (cv.isDirect() && !sb._ctx.backend.isAgentSession(c)) {
@@ -650,8 +656,20 @@ public:
         refreshPresence();
         if (count > 0 || dot || badge)
             makeBadge()->set(count, count == 0 && dot);
-        // Hovered, the "×" takes the badge's place.
-        const bool closing = close && hovered();
+        // A draft shows its pen (the open conversation's is in the composer);
+        // else hovered, the "×" takes the badge's place.
+        const model::Store::Draft *draft = sel ? nullptr : store.draft(conv, 0);
+        pen->setVisible(draft);
+        if (draft) {
+            std::string              text;
+            std::vector<uint16_t>    fmt;
+            std::vector<std::string> links;
+            rich::fromHtml(draft->html, &text, &fmt, &links);
+            std::replace(text.begin(), text.end(), '\n', ' ');
+            text = utf8::ellipsize(str::trim(text), 60);
+            pen->setTooltip(text.empty() ? tr("Draft") : i18n::arg(tr("Draft “%1”"), text));
+        }
+        const bool closing = close && hovered() && !draft;
         if (close)
             close->setVisible(closing);
         if (closing && badge)
@@ -683,6 +701,7 @@ public:
     CountBadge    *badge   = nullptr;
     HuddlePill    *huddle  = nullptr;
     HeaderButton  *close   = nullptr; // DMs and apps: shown on hover
+    HeaderButton  *pen     = nullptr; // shown while it has a draft
     SectionHeader *section = nullptr;
     size_t         base    = 0; // its place in the section as listed (before the sort)
     bool           unread = false, dot = false;
@@ -814,10 +833,8 @@ Sidebar::Sidebar(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _avatars(
             // A closed DM or app opened again (its next message, or opened):
             // to the top of its section.
             if (ch.conv < _wasMember.size()) {
-                if (!_wasMember[ch.conv] && cv.member && cv.isDirect()) {
-                    std::erase(_reopened, ch.conv);
-                    _reopened.insert(_reopened.begin(), ch.conv);
-                }
+                if (!_wasMember[ch.conv] && cv.member && cv.isDirect())
+                    _reopenedAt[ch.conv] = _ctx.backend.nowSecs() * 1000000;
                 _wasMember[ch.conv] = cv.member;
             }
             // Under unreads-only a row comes or goes when its bold state
@@ -1028,12 +1045,13 @@ void Sidebar::rebuild() {
     for (ConvRef c = 0; c < store.conversationCount(); ++c)
         _wasMember[c] = store.conversation(c).member;
     // The reopened ones lead Direct messages and Agents & apps, latest first.
-    const auto rank = [this](ConvRef c) {
-        return std::find(_reopened.begin(), _reopened.end(), c) - _reopened.begin();
+    const auto reopened = [this](ConvRef c) {
+        const auto it = _reopenedAt.find(c);
+        return it == _reopenedAt.end() ? model::Ts(0) : it->second;
     };
     for (int s : {2, 3})
         std::stable_sort(lists[s].begin(), lists[s].end(), [&](ConvRef a, ConvRef b) {
-            return rank(a) < rank(b);
+            return reopened(a) > reopened(b);
         });
     _hiddenChannels = _showAllChannels ? 0 : int(hiddenCh.size());
     if (_showAllChannels)
@@ -1250,8 +1268,6 @@ void Sidebar::sectionsSoon() {
 }
 
 void Sidebar::resortSoon() {
-    if (_sorts.empty())
-        return;
     _resort = true;
     sectionsSoon();
 }
@@ -1287,9 +1303,12 @@ std::vector<size_t> Sidebar::sortedOrder(SectionSort sort, const std::vector<Con
     for (size_t i = 0; i < rows.size(); ++i) {
         const auto &cv = store.conversation(rows[i]);
         keys[i].unread = sort.unreadsFirst && paintsUnread(cv);
-        if (sort.by == SectionSort::By::Recent)
-            keys[i].recent = std::max(cv.latest, cv.lastRead);
-        else if (sort.by == SectionSort::By::Alpha)
+        if (sort.by == SectionSort::By::Recent) {
+            const auto r   = _reopenedAt.find(rows[i]); // reopened counts as activity
+            keys[i].recent = std::max(
+                {cv.latest, cv.lastRead, r == _reopenedAt.end() ? model::Ts(0) : r->second}
+            );
+        } else if (sort.by == SectionSort::By::Alpha)
             keys[i].name = utf8::foldCase(store.displayName(rows[i]));
     }
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
@@ -1315,7 +1334,7 @@ std::string SectionSort::encode() const {
     std::string out = by == By::Alpha ? "alpha" : by == By::Recent ? "recent" : "";
     if (unreadsFirst)
         out += out.empty() ? "unreads" : ",unreads";
-    return out;
+    return out.empty() ? "listed" : out; // a plain one is kept where it is not the default
 }
 
 SectionSort SectionSort::decode(std::string_view s) {
@@ -1346,13 +1365,22 @@ std::string Sidebar::sectionKey(int kind, const std::string &id) {
     return {};
 }
 
+// Like Slack: direct messages and apps most recent first, the rest as listed.
+SectionSort Sidebar::defaultSort(const std::string &key) {
+    return key == "#direct" || key == "#apps" ? SectionSort{SectionSort::By::Recent}
+                                              : SectionSort{};
+}
+
 SectionSort Sidebar::sortOf(const SectionHeader *h) const {
-    const auto it = _sorts.find(sectionKey(h->kind, h->sectionId));
-    return it == _sorts.end() ? SectionSort{} : it->second;
+    const std::string key = sectionKey(h->kind, h->sectionId);
+    const auto        it  = _sorts.find(key);
+    return it == _sorts.end() ? defaultSort(key) : it->second;
 }
 
 void Sidebar::setSorts(Sorts sorts) {
-    std::erase_if(sorts, [](const auto &e) { return e.first.empty() || e.second.plain(); });
+    std::erase_if(sorts, [](const auto &e) {
+        return e.first.empty() || e.second == defaultSort(e.first);
+    });
     if (sorts == _sorts)
         return;
     _sorts = std::move(sorts);
@@ -1361,7 +1389,7 @@ void Sidebar::setSorts(Sorts sorts) {
 
 void Sidebar::setSort(const std::string &key, SectionSort sort) {
     Sorts next = _sorts;
-    if (sort.plain())
+    if (sort == defaultSort(key))
         next.erase(key);
     else
         next[key] = sort;
@@ -1738,6 +1766,8 @@ Sidebar::RowState Sidebar::rowState(ConvRef conv) const {
     s.badge    = r->count;
     s.selected = r->checked();
     s.huddle   = r->huddleCount;
+    if (r->pen->visible())
+        s.draft = r->pen->tooltip();
     return s;
 }
 

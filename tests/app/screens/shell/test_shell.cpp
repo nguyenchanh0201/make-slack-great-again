@@ -737,7 +737,7 @@ TEST("sort: the section menu ticks the sort; its items pick the next one") {
     CHECK_STR(s.encode(), "recent,unreads");
     CHECK(shell::SectionSort::decode("recent,unreads") == s);
     CHECK((shell::SectionSort::decode("unreads,bogus") == shell::SectionSort{By::Default, true}));
-    CHECK_STR(shell::SectionSort{}.encode(), "");
+    CHECK_STR(shell::SectionSort{}.encode(), "listed");
 }
 
 namespace {

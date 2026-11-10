@@ -68,7 +68,7 @@ std::optional<double> quickSwitchScore(const QuickSwitchName &n, const std::vect
     // Group DMs are named after their members, so a person matches every
     // group they are in as well as their DM — and the groups, often more
     // recent, buried it (issue #61): half a consecutive match.
-    return *s + (n.group ? -0.5 : 0.0);
+    return *s + (n.group && !q.empty() ? -0.5 : 0.0); // nothing typed: nothing buried
 }
 
 std::vector<QuickSwitchName>

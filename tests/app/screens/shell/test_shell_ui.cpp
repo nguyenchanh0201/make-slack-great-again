@@ -359,6 +359,39 @@ TEST("sidebar: a closed DM that opens again comes back at the top of its section
     CHECK(firstDm() == other);
 }
 
+TEST("sidebar: direct messages are most recent first by default") {
+    Harness              h;
+    std::vector<ConvRef> dms;
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).isDirect() && !h.store.conversation(c).starred)
+            dms.push_back(c);
+    REQUIRE(dms.size() >= 2);
+    const ConvRef last = dms.back(); // a message now: to the top
+    h.store.updateConversation(last, [](Conversation &c) { c.latest = c.lastRead = 1LL << 60; });
+    pump();
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).isDirect() && !h.store.conversation(c).starred) {
+            CHECK(c == last);
+            break;
+        }
+}
+
+TEST("sidebar: a conversation with a draft shows a pen with its text, not the open one") {
+    Harness h;
+    ConvRef dm = kNoConv;
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).isDirect() && c != h.sidebar().selected())
+            dm = c;
+    REQUIRE(dm != kNoConv);
+    CHECK_STR(h.sidebar().rowState(dm).draft, "");
+    h.store.setDraft(dm, 0, "<p>see you\nat 4</p>", {});
+    pump();
+    CHECK_STR(h.sidebar().rowState(dm).draft, "Draft “see you at 4”");
+    h.sidebar().select(dm); // open: the composer has it
+    pump();
+    CHECK_STR(h.sidebar().rowState(dm).draft, "");
+}
+
 TEST("sidebar: a DM whose peer was deactivated is not listed") {
     Harness    h;
     // A reinstalled app leaves its old, deactivated bot users behind, each

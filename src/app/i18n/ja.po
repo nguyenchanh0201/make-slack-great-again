@@ -810,11 +810,11 @@ msgstr "AIで文字起こし"
 msgid "View transcript"
 msgstr "文字起こしを表示"
 
-#: src/app/screens/messages/audio_card.cpp
+#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
 msgid "Pause"
 msgstr "一時停止"
 
-#: src/app/screens/messages/audio_card.cpp
+#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
 msgid "Play"
 msgstr "再生"
 
@@ -822,7 +822,7 @@ msgstr "再生"
 msgid "Downloading %1"
 msgstr "%1をダウンロード中"
 
-#: src/app/screens/messages/audio_card.cpp
+#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
 msgid "Download failed"
 msgstr "ダウンロードに失敗しました"
 
@@ -943,6 +943,14 @@ msgid "Loading image…"
 msgstr "画像を読み込み中…"
 
 #: src/app/screens/messages/message_list.cpp
+msgid "Previous image"
+msgstr ""
+
+#: src/app/screens/messages/message_list.cpp
+msgid "Next image"
+msgstr ""
+
+#: src/app/screens/messages/message_list.cpp
 msgid "Download"
 msgstr "ダウンロード"
 
@@ -958,9 +966,25 @@ msgstr "ブラウザで開く"
 msgid "More actions"
 msgstr "その他の操作"
 
+#: src/app/screens/messages/message_list.cpp src/app/screens/messages/thread_panel.cpp src/app/screens/shell/shell.cpp
+msgid "Thread"
+msgstr "スレッド"
+
 #: src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp src/app/screens/shell/sidebar.cpp
 msgid "Close"
 msgstr "閉じる"
+
+#: src/app/screens/messages/message_list.cpp
+msgid "Loading video…"
+msgstr ""
+
+#: src/app/screens/messages/message_list.cpp src/app/screens/shell/context_menus.cpp
+msgid "Mute"
+msgstr "ミュート"
+
+#: src/app/screens/messages/message_list.cpp src/app/screens/shell/context_menus.cpp
+msgid "Unmute"
+msgstr "ミュート解除"
 
 #: src/app/screens/messages/message_list.cpp
 msgid "No messages yet"
@@ -1402,10 +1426,6 @@ msgstr "メッセージ数: %1"
 #: src/app/screens/messages/thread_export.cpp
 msgid "Downloading thread…"
 msgstr "スレッドをダウンロード中…"
-
-#: src/app/screens/messages/thread_panel.cpp src/app/screens/shell/shell.cpp
-msgid "Thread"
-msgstr "スレッド"
 
 #: src/app/screens/messages/thread_panel.cpp
 msgid "Download thread as text"
@@ -2800,14 +2820,6 @@ msgid "Mute and hide"
 msgstr "ミュートして非表示"
 
 #: src/app/screens/shell/context_menus.cpp
-msgid "Mute"
-msgstr "ミュート"
-
-#: src/app/screens/shell/context_menus.cpp
-msgid "Unmute"
-msgstr "ミュート解除"
-
-#: src/app/screens/shell/context_menus.cpp
 msgid "Name conversation…"
 msgstr "会話に名前を付ける…"
 
@@ -3444,6 +3456,14 @@ msgstr "ダイレクトメッセージを開く"
 #: src/app/screens/shell/sidebar.cpp src/app/screens/shell/threads_page.cpp
 msgid "you"
 msgstr "自分"
+
+#: src/app/screens/shell/sidebar.cpp
+msgid "Draft"
+msgstr "下書き"
+
+#: src/app/screens/shell/sidebar.cpp
+msgid "Draft “%1”"
+msgstr "下書き「%1」"
 
 #: src/app/screens/shell/sidebar.cpp
 msgid "Starred"

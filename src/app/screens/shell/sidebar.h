@@ -109,7 +109,7 @@ public:
     const VisitStamps    &visited() const { return _visited; }
     void                  clearVisited(); // Settings → "Clear state"
     std::function<void()> onVisitedChanged;
-    // Each section's sort by its key (sectionKey; plain ones left out). The
+    // Each section's sort by its key (sectionKey; defaults left out). The
     // shell keeps them per workspace and sets them on a switch;
     // onSortsChanged fires when the section menu changed one.
     using Sorts = std::unordered_map<std::string, SectionSort>;
@@ -129,9 +129,10 @@ public:
 
     // What a row shows (tests, and the tray/badge code).
     struct RowState {
-        bool exists = false, visible = false, bold = false, dot = false, selected = false;
-        int  badge  = 0;
-        int  huddle = 0; // a live huddle's pill: its participant count (1 when none listed)
+        bool        exists = false, visible = false, bold = false, dot = false, selected = false;
+        int         badge  = 0;
+        int         huddle = 0; // a live huddle's pill: its participant count (1 when none listed)
+        std::string draft;      // the draft pen's tooltip ("" = no pen)
     };
     RowState                 rowState(model::ConvRef conv) const;
     // Tests: how many times the rows were rebuilt, and a row's identity (the
@@ -235,6 +236,7 @@ private:
     void               addChannelsMenu(ui::PointF at);
     void               sectionMenu(SectionHeader *h, ui::PointF at); // More actions
     SectionSort        sortOf(const SectionHeader *h) const;
+    static SectionSort defaultSort(const std::string &key);
     // The order a section's conversations show in under `sort`: indexes
     // into `rows` (as listed; unchanged when plain).
     std::vector<size_t>
@@ -243,45 +245,45 @@ private:
     bool sortsHold() const; // every sorted section still in its order
     void refreshTeammates();
 
-    screens::Context                      &_ctx;
-    Avatars                               &_avatars;
-    ui::ScrollView                        *_scroll = nullptr;
-    ui::View                              *_items  = nullptr;
-    SidebarFooter                         *_footer = nullptr;
-    Menus                                 *_menus  = nullptr;
-    std::vector<ConvRow *>                 _rows;
-    std::vector<ConvRow *>                 _rowOf; // by ConvRef: the row, else null
-    // DMs and apps that opened again after being closed, latest first: they
-    // lead their section (as listed). shortcut: this run only, not saved.
-    std::vector<model::ConvRef>            _reopened;
-    std::vector<char>                      _wasMember; // by ConvRef, as last seen
-    std::vector<TeammateRow *>             _teamRows;
-    std::vector<model::Backend::AgentRole> _team; // as last listed (rebuild)
-    std::string                            _selectedTeammate;
-    std::vector<SectionHeader *>           _sections;
-    std::vector<ui::View *>                _nav; // Activity, Threads, Saved, Scheduled messages
-    std::vector<const char *>              _navTitles;
-    ui::View                *_savedRow = nullptr, *_threadsRow = nullptr, *_scheduledRow = nullptr;
-    ui::View                *_activityRow = nullptr;
-    Nav                      _navSelected = Nav::None;
-    VisitStamps              _visited; // opened here (visit stamps)
-    Sorts                    _sorts;
-    Filters                  _filters;
-    model::ConvRef           _selected        = model::kNoConv;
-    model::Store::ObserverId _observer        = 0;
-    std::shared_ptr<int>     _alive           = std::make_shared<int>(0);
-    plat::TimerId            _rebuildTimer    = 0;
-    plat::TimerId            _usersTimer      = 0;
-    plat::TimerId            _sectionsTimer   = 0;
-    uint64_t                 _userShape       = 0; // userShape() at the last rebuild
+    screens::Context                             &_ctx;
+    Avatars                                      &_avatars;
+    ui::ScrollView                               *_scroll = nullptr;
+    ui::View                                     *_items  = nullptr;
+    SidebarFooter                                *_footer = nullptr;
+    Menus                                        *_menus  = nullptr;
+    std::vector<ConvRow *>                        _rows;
+    std::vector<ConvRow *>                        _rowOf; // by ConvRef: the row, else null
+    // DMs and apps that opened again after being closed, and when: that
+    // counts as their latest activity. shortcut: this run only, not saved.
+    std::unordered_map<model::ConvRef, model::Ts> _reopenedAt;
+    std::vector<char>                             _wasMember; // by ConvRef, as last seen
+    std::vector<TeammateRow *>                    _teamRows;
+    std::vector<model::Backend::AgentRole>        _team; // as last listed (rebuild)
+    std::string                                   _selectedTeammate;
+    std::vector<SectionHeader *>                  _sections;
+    std::vector<ui::View *>   _nav; // Activity, Threads, Saved, Scheduled messages
+    std::vector<const char *> _navTitles;
+    ui::View                 *_savedRow = nullptr, *_threadsRow = nullptr, *_scheduledRow = nullptr;
+    ui::View                 *_activityRow = nullptr;
+    Nav                       _navSelected = Nav::None;
+    VisitStamps               _visited; // opened here (visit stamps)
+    Sorts                     _sorts;
+    Filters                   _filters;
+    model::ConvRef            _selected        = model::kNoConv;
+    model::Store::ObserverId  _observer        = 0;
+    std::shared_ptr<int>      _alive           = std::make_shared<int>(0);
+    plat::TimerId             _rebuildTimer    = 0;
+    plat::TimerId             _usersTimer      = 0;
+    plat::TimerId             _sectionsTimer   = 0;
+    uint64_t                  _userShape       = 0; // userShape() at the last rebuild
     // The Store and its profile / text revisions _userShape was taken at.
-    const model::Store      *_shapeStore      = nullptr;
-    uint64_t                 _shapeProfileRev = 0, _shapeTextRev = 0;
-    model::UserRef           _shapeMe         = model::kNoUser;
-    int                      _rebuilds        = 0;
-    bool                     _revealOnRebuild = false;
-    int                      _hiddenChannels  = 0;
-    bool                     _collapsed[5]    = {};         // starred, channels, DMs, apps, team
+    const model::Store       *_shapeStore      = nullptr;
+    uint64_t                  _shapeProfileRev = 0, _shapeTextRev = 0;
+    model::UserRef            _shapeMe         = model::kNoUser;
+    int                       _rebuilds        = 0;
+    bool                      _revealOnRebuild = false;
+    int                       _hiddenChannels  = 0;
+    bool                      _collapsed[5]    = {};        // starred, channels, DMs, apps, team
     std::unordered_map<std::string, bool> _collapsedCustom; // the user's sections, by id
     uint64_t _sectionsRev     = 0;       // Store::sectionsRevision at the last rebuild
     ConvRow *_dragRow         = nullptr; // a row being dragged

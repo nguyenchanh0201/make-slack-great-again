@@ -1416,6 +1416,14 @@ TEST("slack read: mappers — blocks, rich text, message_changed, conversations"
     CHECK(c.notify == model::NotifyLevel::Mentions);
     CHECK(!c.canvasTitle.empty());
     CHECK_STR(c.canvasId, "F9");
+    // A DM closed in Slack (im.list lists every one) is not open here either.
+    for (const char *open : {"false", "true"}) {
+        REQUIRE(d.parse(
+            str::concat({R"({"id": "D7", "is_im": true, "user": "U7", "is_open": )", open, "}"}),
+            nullptr
+        ));
+        CHECK(slack::mapjson::toConversation(d.root(), store).member == (open[0] == 't'));
+    }
 }
 
 #endif // !_WIN32

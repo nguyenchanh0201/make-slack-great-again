@@ -410,10 +410,12 @@ model::Conversation toConversation(const json::Value &o, model::Store &store) {
     const std::string topic = trimmed(o["topic"]["value"]);
     c.topic                 = !topic.empty() ? topic : trimmed(o["purpose"]["value"]);
     c.member                = o["is_member"].boolean(true);
-    c.memberCount           = uint32_t(o["num_members"].integer());
-    c.lastRead              = model::parseTs(o["last_read"].str());
-    c.latest                = latestTs(o);
-    const int64_t unread    = o["unread_count"].integer();
+    if (c.isDirect()) // a closed DM: im.list lists every one, is_open tells
+        c.member = o["is_open"].boolean(c.member);
+    c.memberCount        = uint32_t(o["num_members"].integer());
+    c.lastRead           = model::parseTs(o["last_read"].str());
+    c.latest             = latestTs(o);
+    const int64_t unread = o["unread_count"].integer();
     c.unread   = unread > 0 ? uint32_t(unread) : (c.latest && c.lastRead && c.latest > c.lastRead);
     c.mentions = uint32_t(o["mention_count"].integer());
     c.muted    = o["is_muted"].boolean();
