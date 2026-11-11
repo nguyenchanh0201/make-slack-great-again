@@ -1,9 +1,12 @@
 #include "app/screens/common/downloads.h"
 
+#include "app/model/downloads.h"
 #include "app/model/jobs.h"
 #include "app/screens/common/remote_images.h"
 #include "base/crypto.h"
 #include "base/file.h"
+#include "base/i18n.h"
+#include "base/log.h"
 #include "base/str.h"
 #include "plat/plat.h"
 
@@ -12,14 +15,15 @@
 namespace screens {
 
 void fetchFile(
-    plat::App           &app,
-    model::Backend      &backend,
-    const std::string   &source,
-    std::string          toPath,
-    model::Backend::Done done
+    plat::App               &app,
+    model::Backend          &backend,
+    const std::string       &source,
+    std::string              toPath,
+    model::Backend::Done     done,
+    model::Backend::Progress progress
 ) {
     if (RemoteImages::isRemote(source)) {
-        backend.downloadFile(source, std::move(toPath), std::move(done));
+        backend.downloadFile(source, std::move(toPath), std::move(done), std::move(progress));
         return;
     }
     auto ok = std::make_shared<bool>(false);
@@ -32,6 +36,53 @@ void fetchFile(
             if (done)
                 done(*ok, *ok ? std::string() : std::string("copy_failed"));
         }
+    );
+}
+
+std::string uniqueDownloadPath(std::string_view dir, std::string_view name) {
+    std::string base(file::baseName(name));
+    if (base.empty() || base == "." || base == "..")
+        base = "file";
+    // "archive.tar.gz" numbers before its first dot, "report.pdf" before
+    // ".pdf"; a leading dot (".env") is part of the stem.
+    const size_t      dot   = base.find('.', 1);
+    const std::string stem  = base.substr(0, dot),
+                      ext   = dot == std::string::npos ? "" : base.substr(dot);
+    const auto        taken = [](const std::string &p) {
+        if (file::exists(p))
+            return true;
+        for (const model::Downloads::Item &it : model::downloads().items())
+            if (it.state == model::Downloads::State::Running && it.path == p)
+                return true;
+        return false;
+    };
+    std::string path = file::join(dir, base);
+    for (int n = 1; taken(path) && n < 10000; ++n)
+        path = file::join(dir, str::concat({stem, " (", str::number(int64_t(n)), ")", ext}));
+    return path;
+}
+
+void startDownload(
+    plat::App         &app,
+    model::Backend    &backend,
+    std::string        name,
+    const std::string &source,
+    std::string        toPath
+) {
+    const int job = model::jobs().begin(i18n::arg(i18n::tr("Downloading %1"), name));
+    const int id  = model::downloads().begin(std::move(name), toPath);
+    fetchFile(
+        app,
+        backend,
+        source,
+        std::move(toPath),
+        [job, id](bool ok, const std::string &err) {
+            if (!ok)
+                LOG_WARN("messages", "File download failed: %s", err.c_str());
+            model::jobs().end(job);
+            model::downloads().finish(id, ok, err);
+        },
+        [id](int64_t received, int64_t total) { model::downloads().progress(id, received, total); }
     );
 }
 

@@ -21,12 +21,29 @@ class App;
 
 namespace screens {
 
+// `progress` (remote sources only) hears the transfer as it goes.
 void fetchFile(
-    plat::App           &app,
-    model::Backend      &backend,
-    const std::string   &source,
-    std::string          toPath,
-    model::Backend::Done done
+    plat::App               &app,
+    model::Backend          &backend,
+    const std::string       &source,
+    std::string              toPath,
+    model::Backend::Done     done,
+    model::Backend::Progress progress = {}
+);
+
+// A free path for `name` in `dir`: "report.pdf", else "report (1).pdf", …,
+// skipping files there and downloads still running to it. The name is
+// reduced to its last path component ("file" when nothing is left).
+std::string uniqueDownloadPath(std::string_view dir, std::string_view name);
+// A download the user asked for: `source` to `toPath`, listed in
+// model::downloads() (the tray: progress, then Show in Finder) and as a job
+// while it runs.
+void        startDownload(
+    plat::App         &app,
+    model::Backend    &backend,
+    std::string        name,
+    const std::string &source,
+    std::string        toPath
 );
 
 // A fresh path for a downloaded copy of `name` under the OS temp directory

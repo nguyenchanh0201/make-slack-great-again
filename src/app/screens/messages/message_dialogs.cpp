@@ -16,7 +16,9 @@
 #include "ui/datetime.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 
 namespace screens {
 
@@ -661,6 +663,345 @@ ui::Popup *showTableViewer(ui::Window &w, std::vector<std::vector<std::string>> 
     auto  v   = std::make_unique<TableViewer>(std::move(rows), nullptr);
     auto *raw = v.get();
     w.showPopup(std::move(v));
+    return raw;
+}
+
+// ── Markdown viewer ─────────────────────────────────────────────────────────
+
+namespace {
+
+bool mdPunct(char c) {
+    return std::ispunct(uint8_t(c)) != 0;
+}
+bool mdWord(char c) {
+    return std::isalnum(uint8_t(c)) != 0;
+}
+
+// One line's inline Markdown into `out` on top of `base`.
+void mdInline(
+    std::string_view          line,
+    const text::Style        &base,
+    text::AttributedText     &out,
+    std::vector<std::string> *links
+) {
+    bool       bold = false, ital = false, strike = false;
+    const auto style = [&] {
+        text::Style s = base;
+        if (bold)
+            s.weight = text::Weight::Bold;
+        s.italic = s.italic || ital;
+        s.strike = strike;
+        return s;
+    };
+    const auto link = [&](std::string_view label, std::string url) {
+        text::Style s = style();
+        s.color       = ui::themed(C::Link);
+        if (links) {
+            links->push_back(std::move(url));
+            s.linkId = uint32_t(links->size());
+        }
+        out.append(label, s);
+    };
+    // A closer for the delimiter `d` later on the line, after `from`.
+    const auto closes = [&](size_t from, std::string_view d) {
+        const size_t at = line.find(d, from);
+        return at != std::string_view::npos && at > from;
+    };
+    for (size_t i = 0; i < line.size();) {
+        const char c = line[i];
+        if (c == '\\' && i + 1 < line.size() && mdPunct(line[i + 1])) { // an escape
+            out.append(line.substr(i + 1, 1), style());
+            i += 2;
+            continue;
+        }
+        if (c == '`') { // a code span: the same run of backticks closes it
+            size_t n = i;
+            while (n < line.size() && line[n] == '`')
+                ++n;
+            const std::string_view tick = line.substr(i, n - i);
+            const size_t           end  = line.find(tick, n);
+            if (end != std::string_view::npos) {
+                text::Style s = base;
+                s.mono        = true;
+                s.background  = ui::themed(C::CodeBg);
+                out.append(str::trim(line.substr(n, end - n)), s);
+                i = end + tick.size();
+                continue;
+            }
+        }
+        if ((line.compare(i, 2, "**") == 0 || line.compare(i, 2, "__") == 0) &&
+            (bold || closes(i + 2, line.substr(i, 2)))) {
+            bold = !bold;
+            i += 2;
+            continue;
+        }
+        if (line.compare(i, 2, "~~") == 0 && (strike || closes(i + 2, "~~"))) {
+            strike = !strike;
+            i += 2;
+            continue;
+        }
+        // A single * or _ (an _ only at a word's edge: snake_case stays).
+        if ((c == '*' || c == '_') && !(c == '_' && i > 0 && mdWord(line[i - 1]) &&
+                                        i + 1 < line.size() && mdWord(line[i + 1]))) {
+            const bool opens = !ital && i + 1 < line.size() && line[i + 1] != ' ' &&
+                               closes(i + 1, std::string_view(&line[i], 1));
+            if (opens || ital) {
+                ital = !ital;
+                ++i;
+                continue;
+            }
+        }
+        const bool image = c == '!' && i + 1 < line.size() && line[i + 1] == '[';
+        if (c == '[' || image) { // [label](url), ![alt](url)
+            const size_t open  = i + (image ? 1 : 0);
+            const size_t close = line.find("](", open);
+            const size_t endU  = close == std::string_view::npos ? close : line.find(')', close);
+            if (endU != std::string_view::npos) {
+                std::string_view url         = line.substr(close + 2, endU - close - 2);
+                url                          = url.substr(0, url.find(' ')); // a "title" after it
+                const std::string_view label = line.substr(open + 1, close - open - 1);
+                link(label.empty() ? url : label, std::string(url));
+                i = endU + 1;
+                continue;
+            }
+        }
+        if (c == '<' && (line.compare(i + 1, 7, "http://") == 0 ||
+                         line.compare(i + 1, 8, "https://") == 0)) { // <https://…>
+            const size_t end = line.find('>', i);
+            if (end != std::string_view::npos) {
+                const std::string_view url = line.substr(i + 1, end - i - 1);
+                link(url, std::string(url));
+                i = end + 1;
+                continue;
+            }
+        }
+        size_t j = i + 1; // plain text up to the next character that may be syntax
+        while (j < line.size() && !std::strchr("\\`*_~[!<", line[j]))
+            ++j;
+        out.append(line.substr(i, j - i), style());
+        i = j;
+    }
+}
+
+} // namespace
+
+text::AttributedText markdownPreviewText(std::string_view md, std::vector<std::string> *links) {
+    text::AttributedText out;
+    const text::Style    body  = ui::font(ui::Font::Body, C::Text);
+    text::Style          muted = body;
+    muted.color                = ui::themed(C::TextMuted);
+    text::Style code           = body;
+    code.mono                  = true;
+    code.background            = ui::themed(C::CodeBg);
+    bool       fence = false, para = false, any = false;
+    // A new line of the output (a blank one between blocks after `gap`).
+    const auto newLine = [&](bool gap) {
+        if (any)
+            out.append(gap ? "\n\n" : "\n", body);
+        any  = true;
+        para = false;
+    };
+    size_t blank = 0; // blank source lines before this one
+    for (size_t at = 0; at <= md.size();) {
+        const size_t     nl   = std::min(md.find('\n', at), md.size());
+        std::string_view line = md.substr(at, nl - at);
+        at                    = nl + 1;
+        if (!line.empty() && line.back() == '\r')
+            line.remove_suffix(1);
+        const std::string_view t = str::trim(line);
+        if (str::startsWith(t, "```") || str::startsWith(t, "~~~")) {
+            fence = !fence;
+            if (fence)
+                newLine(blank > 0 || para);
+            blank = 0;
+            continue;
+        }
+        if (fence) { // code as written
+            if (any && !str::endsWith(out.text, "\n") && !str::endsWith(out.text, "\n\n"))
+                out.append("\n", body);
+            any = true;
+            out.append(line.empty() ? std::string_view(" ") : line, code);
+            continue;
+        }
+        if (t.empty()) {
+            ++blank;
+            para = false;
+            continue;
+        }
+        const bool gap = blank > 0;
+        blank          = 0;
+        // A rule: three or more of one of - * _ (spaces allowed).
+        if (t.size() >= 3 && std::strchr("-*_", t[0])) {
+            bool rule = true;
+            int  n    = 0;
+            for (char ch : t)
+                if (ch == t[0])
+                    ++n;
+                else if (ch != ' ')
+                    rule = false;
+            if (rule && n >= 3) {
+                newLine(true);
+                out.append(
+                    "\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80"
+                    "\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80",
+                    muted
+                );
+                continue;
+            }
+        }
+        if (t[0] == '#') { // # .. ###### headings
+            size_t level = 0;
+            while (level < t.size() && t[level] == '#')
+                ++level;
+            if (level <= 6 && (level == t.size() || t[level] == ' ')) {
+                text::Style h = body;
+                h.weight      = text::Weight::Bold;
+                h.size *= level == 1 ? 1.6f : level == 2 ? 1.35f : level == 3 ? 1.15f : 1.0f;
+                newLine(any);
+                std::string_view text = str::trim(t.substr(level));
+                while (!text.empty() && text.back() == '#') // closing #s
+                    text.remove_suffix(1);
+                mdInline(str::trim(text), h, out, links);
+                continue;
+            }
+        }
+        if (t[0] == '|') { // a table row as written; its |---| rule dropped
+            if (t.find_first_not_of("|-: ") == std::string_view::npos)
+                continue;
+            newLine(gap);
+            mdInline(t, code, out, links);
+            continue;
+        }
+        const size_t indent = line.find_first_not_of(" \t");
+        std::string  lead(indent / 2 * 4, ' '); // nested items, 4 spaces a level
+        if (t[0] == '>') {                      // a quote (nested ones flattened)
+            std::string_view q = t;
+            while (!q.empty() && (q[0] == '>' || q[0] == ' '))
+                q.remove_prefix(1);
+            newLine(gap);
+            out.append("\xE2\x96\x8E ", muted);
+            mdInline(q, muted, out, links);
+            continue;
+        }
+        if (t.size() >= 2 && std::strchr("-*+", t[0]) && t[1] == ' ') { // - item
+            std::string_view item = t.substr(2);
+            std::string      mark = "\xE2\x80\xA2 ";
+            if (str::startsWith(item, "[ ] ") || str::startsWith(item, "[x] ") ||
+                str::startsWith(item, "[X] ")) {
+                mark = item[1] == ' ' ? "\xE2\x98\x90 " : "\xE2\x98\x91 ";
+                item.remove_prefix(4);
+            }
+            newLine(gap);
+            out.append(lead + mark, body);
+            mdInline(item, body, out, links);
+            continue;
+        }
+        size_t digits = 0;
+        while (digits < t.size() && std::isdigit(uint8_t(t[digits])))
+            ++digits;
+        if (digits > 0 && digits + 1 < t.size() && (t[digits] == '.' || t[digits] == ')') &&
+            t[digits + 1] == ' ') { // 1. item
+            newLine(gap);
+            out.append(lead + std::string(t.substr(0, digits)) + ". ", body);
+            mdInline(t.substr(digits + 2), body, out, links);
+            continue;
+        }
+        // Paragraph text: the next line of one joins it with a space.
+        if (para && !gap)
+            out.append(" ", body);
+        else
+            newLine(gap);
+        mdInline(t, body, out, links);
+        para = true;
+    }
+    return out;
+}
+
+namespace {
+
+class MarkdownViewer final : public ui::Popup {
+public:
+    MarkdownViewer(
+        Context &ctx, std::string title, std::string_view md, std::function<void()> download
+    )
+        : _ctx(ctx) {
+        setCard(false);
+        setAnchor({}, Place::Fill);
+        setFocusable(true);
+        style().dir = ui::Dir::None;
+        _panel      = add<ui::View>();
+        _panel->setBackground(C::FormBg, 8);
+        _panel->style().column();
+        _panel->setClipChildren(true);
+        auto *bar = _panel->add<ui::View>();
+        bar->style().row().padding(24, 10, 10, 6).spacing(4).items(Align::Center);
+        auto *heading = ui::styledLabel(
+            bar, std::move(title), ui::pxFont(15, text::Weight::Bold, ui::themed(C::Text)), 1
+        );
+        heading->style().flex(1);
+        if (download) {
+            auto *d = bar->add<ui::IconButton>(gfx::Icon::Download, tr("Download"));
+            d->style().size(32, 32);
+            d->setIconSize(16);
+            d->onClick = std::move(download);
+        }
+        auto *x = bar->add<ui::IconButton>(gfx::Icon::X, tr("Close"));
+        x->style().size(32, 32);
+        x->setIconSize(16);
+        x->onClick   = [this] { close(); };
+        auto *scroll = _panel->add<ui::ScrollView>();
+        scroll->style().flex(1);
+        scroll->content()->style().column().padding(24, 8, 24, 24);
+        auto *body = scroll->content()->add<ui::Label>();
+        body->setRichText(markdownPreviewText(md, &_links));
+        body->onLink = [this](uint32_t id) {
+            // Web and mail links only: a relative one points into the repo.
+            if (id == 0 || id > _links.size() || !_ctx.openUrl)
+                return;
+            const std::string &url = _links[id - 1];
+            if (str::startsWith(url, "http://") || str::startsWith(url, "https://") ||
+                str::startsWith(url, "mailto:"))
+                _ctx.openUrl(url);
+        };
+    }
+    void layout() override {
+        const float w = std::min(900.f, std::max(200.f, width() - 80));
+        const float h = std::max(200.f, height() - 80);
+        _panel->setFrame({std::round((width() - w) / 2), std::round((height() - h) / 2), w, h});
+    }
+    void paint(gfx::Painter &p) override { p.fillRect(bounds(), ui::color(C::ViewerBackdrop)); }
+    bool onEvent(ui::Event &e) override {
+        if (e.type == ui::EventType::PointerDown) {
+            if (!_panel->frame().contains(e.pos))
+                close();
+            return true;
+        }
+        if (e.type == ui::EventType::KeyDown && e.key == plat::Key::Escape) {
+            close();
+            return true;
+        }
+        return Popup::onEvent(e);
+    }
+
+private:
+    Context                 &_ctx;
+    ui::View                *_panel = nullptr;
+    std::vector<std::string> _links;
+};
+
+} // namespace
+
+ui::Popup *showMarkdownViewer(
+    ui::Window           &w,
+    Context              &ctx,
+    std::string           title,
+    std::string_view      md,
+    std::function<void()> download
+) {
+    auto  v   = std::make_unique<MarkdownViewer>(ctx, std::move(title), md, std::move(download));
+    auto *raw = v.get();
+    w.showPopup(std::move(v));
+    raw->focus(); // Esc reaches it
     return raw;
 }
 

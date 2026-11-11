@@ -18,7 +18,9 @@ namespace model {
 
 class Backend {
 public:
-    using Done = std::function<void(bool ok, const std::string &error)>;
+    using Done     = std::function<void(bool ok, const std::string &error)>;
+    // Bytes so far and the whole size (0: unknown), on the UI thread.
+    using Progress = std::function<void(int64_t received, int64_t total)>;
 
     explicit Backend(Store &store) : _store(store) {}
     virtual ~Backend()                  = default;
@@ -82,9 +84,11 @@ public:
     // `toPath`, with the service's credentials; the write happens off the UI
     // thread. Local paths never come here: the
     // screens copy those themselves (screens/common/downloads.h). Default,
-    // for backends without remote files: fails at once.
-    virtual void downloadFile(const std::string &url, std::string toPath, Done done) {
-        (void)url, (void)toPath;
+    // for backends without remote files: fails at once. `progress`, when
+    // set, hears the transfer a few times a second.
+    virtual void
+    downloadFile(const std::string &url, std::string toPath, Done done, Progress progress = {}) {
+        (void)url, (void)toPath, (void)progress;
         if (done)
             done(false, "not supported");
     }

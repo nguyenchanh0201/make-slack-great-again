@@ -74,8 +74,10 @@ void BackendProxy::deleteFile(ConvRef c, Ts ts, const std::string &fileId) {
 void BackendProxy::deleteAttachment(ConvRef c, Ts ts, int attachmentId, Done d) {
     _t->deleteAttachment(c, ts, attachmentId, std::move(d));
 }
-void BackendProxy::downloadFile(const std::string &url, std::string toPath, Done done) {
-    _t->downloadFile(url, std::move(toPath), std::move(done));
+void BackendProxy::downloadFile(
+    const std::string &url, std::string toPath, Done done, Progress progress
+) {
+    _t->downloadFile(url, std::move(toPath), std::move(done), std::move(progress));
 }
 void BackendProxy::setReminder(ConvRef c, Ts ts, int64_t due) {
     _t->setReminder(c, ts, due);

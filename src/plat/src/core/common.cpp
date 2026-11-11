@@ -1,6 +1,7 @@
 #include "core/backends.h"
 #include "core/pacing.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
@@ -65,6 +66,29 @@ void App::showFileDialogEx(const FileDialogDesc &d, std::function<void(FileDialo
         r.paths = std::move(paths);
         cb(std::move(r));
     });
+}
+
+bool App::revealFile(std::string_view path) {
+    // The folder as a file:// URL, every byte but [A-Za-z0-9/._~-] escaped.
+    // shortcut: no selection (Explorer's /select, the FileManager1 D-Bus
+    // ShowItems would add it on Windows and Linux).
+    const size_t     slash = path.find_last_of("/\\");
+    std::string_view dir   = slash == std::string_view::npos ? path : path.substr(0, slash);
+    std::string      url   = "file://";
+    if (!dir.empty() && dir[0] != '/')
+        url += '/'; // a drive letter
+    for (const char c : dir) {
+        const char ch = c == '\\' ? '/' : c;
+        if (std::isalnum(static_cast<unsigned char>(ch)) || std::strchr("/._~-:", ch))
+            url += ch;
+        else {
+            static const char *hex = "0123456789ABCDEF";
+            url += '%';
+            url += hex[static_cast<unsigned char>(ch) >> 4];
+            url += hex[static_cast<unsigned char>(ch) & 15];
+        }
+    }
+    return !dir.empty() && openUrl(url);
 }
 
 std::vector<std::string> App::preferredLanguages() const {

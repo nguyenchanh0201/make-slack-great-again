@@ -856,6 +856,9 @@ public:
     virtual bool darkMode() const              = 0;
     virtual int  doubleClickMs() const         = 0;
     virtual bool openUrl(std::string_view url) = 0;
+    // Shows a file in the system's file manager: Finder with it selected
+    // (macOS); elsewhere its folder opened (openUrl). False when that failed.
+    virtual bool revealFile(std::string_view path);
 
     // Native input injection for tests (plat/testing.h); null when the
     // backend has no way to synthesise input through the OS, and always null

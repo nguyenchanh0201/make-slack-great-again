@@ -51,6 +51,7 @@ class ThreadArea;
 class UnifiedSearch;
 class TypingIndicator;
 class UpdateBar;
+class DownloadsTray;
 class WorkspaceStack;
 
 class Shell {
@@ -565,7 +566,12 @@ private:
         std::vector<std::string> files;
     };
     std::vector<TeammateDraft> _teammateDrafts;
-    std::shared_ptr<int>       _agentAlive       = std::make_shared<int>(0);
+    std::shared_ptr<int>       _agentAlive        = std::make_shared<int>(0);
+    // The downloads tray, while model::downloads() lists something.
+    DownloadsTray             *_downloadsTray     = nullptr;
+    uint32_t                   _downloadsObserver = 0;
+    bool                       _downloadsPosted   = false;
+    void                       syncDownloads();
     // The error banner (5 s), and what the composer was last given
     // (applyComposerAccess hands changes on only).
     ui::Label                 *_errorBanner      = nullptr;

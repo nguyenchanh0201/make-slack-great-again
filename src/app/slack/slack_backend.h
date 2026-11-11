@@ -122,7 +122,9 @@ public:
     void setSaved(model::ConvRef conv, model::Ts ts, bool saved) override;
     void deleteFile(model::ConvRef conv, model::Ts ts, const std::string &fileId) override;
     void deleteAttachment(model::ConvRef conv, model::Ts ts, int attachmentId, Done done) override;
-    void downloadFile(const std::string &url, std::string toPath, Done done) override;
+    void downloadFile(
+        const std::string &url, std::string toPath, Done done, Progress progress = {}
+    ) override;
     void setReminder(model::ConvRef conv, model::Ts ts, int64_t dueSecs) override;
     void userTyping(model::ConvRef conv, model::Ts threadTs) override;
     void setPresence(bool away, Done done) override;

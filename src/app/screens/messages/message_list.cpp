@@ -25,6 +25,7 @@
 #include "base/mime.h"
 #include "base/str.h"
 #include "base/time.h"
+#include "base/utf8.h"
 #include "gfx/icons_generated.h"
 #include "plat/video.h"
 #include "ui/controls.h"
@@ -1437,36 +1438,31 @@ void MessageList::toggleSaved(Ts ts) {
 }
 
 void MessageList::downloadFile(Ts ts, const std::string &path) {
-    // "Save file" at ~/<name>, then the
-    // original (source(): for audio, path is Slack's transcode) to it, the
-    // footer's cog running from the choice until the bytes are on disk.
+    // Like Slack: straight into Downloads ("report (1).pdf" when taken), the
+    // tray showing its progress, then Show in Finder. The original is what
+    // is fetched (source(): for audio, path is Slack's transcode). No
+    // Downloads folder: "Save file" at ~/<name> instead.
     const model::Message *m = message(ts);
     const model::File    *f = m && !m->pending ? anyFileAt(m, path) : nullptr;
     if (!f)
         return;
-    const std::string name   = f->name.empty() ? std::string(tr("file")) : f->name;
-    const std::string source = f->source();
-    Context          &ctx    = _ctx; // outlives the list; the download may outlive it
+    const std::string name      = f->name.empty() ? std::string(tr("file")) : f->name;
+    const std::string source    = f->source();
+    plat::App        &pa        = _ctx.app.platform();
+    const std::string downloads = pa.standardDir(plat::StandardDir::Downloads);
+    if (!downloads.empty() && (file::isDir(downloads) || file::makeDirs(downloads))) {
+        startDownload(pa, _ctx.backend, name, source, uniqueDownloadPath(downloads, name));
+        return;
+    }
+    Context &ctx = _ctx; // outlives the list; the download may outlive it
     screens::saveFile(
         _ctx,
         name,
         [&ctx, name, source](std::string to) {
-            if (to.empty())
-                return;
-            const int job = model::jobs().begin(arg(tr("Downloading %1"), name));
-            fetchFile(
-                ctx.app.platform(),
-                ctx.backend,
-                source,
-                std::move(to),
-                [job](bool ok, const std::string &err) {
-                    if (!ok)
-                        LOG_WARN("messages", "File download failed: %s", err.c_str());
-                    model::jobs().end(job);
-                }
-            );
+            if (!to.empty())
+                startDownload(ctx.app.platform(), ctx.backend, name, source, std::move(to));
         },
-        _ctx.app.platform().standardDir(plat::StandardDir::Home)
+        pa.standardDir(plat::StandardDir::Home)
     );
 }
 
@@ -2601,6 +2597,13 @@ bool isCsv(const model::File &f) {
     return f.mime == "text/csv" || mime::fromName(f.name) == "text/csv";
 }
 
+// A Markdown file, by type or name (any case).
+bool isMarkdown(const model::File &f) {
+    const std::string e = str::asciiLower(file::extension(f.name));
+    return f.mime == "text/markdown" || f.mime == "text/x-markdown" || e == "md" ||
+           e == "markdown" || e == "mdown" || e == "mkd";
+}
+
 // Due times of the presets, from `now` (local): +20 min, +1 h, +3 h,
 // tomorrow 9:00, next Monday 9:00.
 int64_t remindDue(int preset, int64_t now) {
@@ -2705,8 +2708,8 @@ std::vector<ui::MenuItem> MessageList::fileMenuItems(Ts ts, const std::string &p
     const model::Message     *m     = message(ts);
     const model::File        *f     = anyFileAt(m, path);
     const bool                image = !f || f->isImage();
-    if (f && isCsv(*f))
-        addItem(items, kPreview); // the table viewer
+    if (f && canPreview(*f))
+        addItem(items, kPreview); // the table viewer, the Markdown viewer
     addItem(items, image ? kCopyImageLink : kCopyFileLink);
     if (image)
         addItem(items, kCopyImage);
@@ -2886,7 +2889,7 @@ void MessageList::runMenuAction(Ts ts, int id, const std::string &path, ui::Poin
         break;
     case kPreview:
         if (const model::File *f = anyFileAt(msg, path))
-            openCsvPreview(*f);
+            openPreview(*f, ts);
         break;
     case kCopyImageLink:
     case kCopyFileLink: // the file's permalink, else the original (never a thumbnail)
@@ -2979,30 +2982,53 @@ void MessageList::copyImage(const model::File &f) {
     });
 }
 
+bool MessageList::canPreview(const model::File &f) {
+    return isCsv(f) || isMarkdown(f);
+}
+
 // The file fetched to a temporary copy (a local one
-// read in place), read and parsed on a worker, then the table viewer; the
-// footer's cog runs from the click until it opens (or the download fails).
-void MessageList::openCsvPreview(const model::File &f) {
+// read in place), read and parsed on a worker, then the table viewer or the
+// Markdown viewer; the footer's cog runs from the click until it opens (or
+// the download fails).
+void MessageList::openPreview(const model::File &f, Ts ts) {
     const std::string source = f.source();
-    if (source.empty())
+    if (source.empty() || !canPreview(f))
         return;
+    const bool          csv   = isCsv(f);
     const std::string   name  = f.name.empty() ? std::string(tr("file")) : f.name;
     const int           job   = model::jobs().begin(arg(tr("Downloading %1"), name));
     plat::App          &pa    = _ctx.app.platform();
     std::weak_ptr<char> alive = _alive;
-    auto                parse = [this, alive, &pa, job](std::string local, bool temp) {
+    const std::string   path  = f.path;
+    auto parse = [this, alive, &pa, job, csv, name, ts, path](std::string local, bool temp) {
         auto rows = std::make_shared<std::vector<std::vector<std::string>>>();
+        auto text = std::make_shared<std::string>();
         model::runInBackground(
             pa,
-            [rows, local, temp] {
-                *rows = readCsvFile(local);
+            [rows, text, local, temp, csv] {
+                if (csv)
+                    *rows = readCsvFile(local);
+                else if (!file::readAll(local, text.get()))
+                    text->clear();
                 if (temp)
                     removeTempDownload(local);
             },
-            [this, alive, rows, job] {
+            [this, alive, rows, text, job, csv, name, ts, path] {
                 model::jobs().end(job);
-                if (!alive.expired() && window())
+                if (alive.expired() || !window())
+                    return;
+                if (csv) {
                     showTableViewer(*window(), std::move(*rows));
+                    return;
+                }
+                // shortcut: the first 512 KB of a longer file, a Markdown
+                // viewer that pages would show the rest.
+                if (text->size() > 512 * 1024)
+                    text->resize(utf8::prevBoundary(*text, 512 * 1024));
+                showMarkdownViewer(*window(), _ctx, name, *text, [this, alive, ts, path] {
+                    if (!alive.expired() && ts)
+                        downloadFile(ts, path);
+                });
             }
         );
     };
@@ -3012,7 +3038,7 @@ void MessageList::openCsvPreview(const model::File &f) {
     }
     std::string temp = tempDownloadPath(pa, name);
     if (temp.empty()) {
-        LOG_WARN("messages", "CSV preview download failed: no temporary directory");
+        LOG_WARN("messages", "Preview download failed: no temporary directory");
         model::jobs().end(job);
         return;
     }
@@ -3021,7 +3047,7 @@ void MessageList::openCsvPreview(const model::File &f) {
             parse(temp, true);
             return;
         }
-        LOG_WARN("messages", "CSV preview download failed: %s", err.c_str());
+        LOG_WARN("messages", "Preview download failed: %s", err.c_str());
         removeTempDownload(temp);
         model::jobs().end(job);
     });

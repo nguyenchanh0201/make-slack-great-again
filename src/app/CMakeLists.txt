@@ -8,6 +8,7 @@ add_library(msga_app_core STATIC
     model/backend.cpp
     model/backend_proxy.cpp
     model/jobs.cpp
+    model/downloads.cpp
     model/timers.cpp
     cache/workspace_cache.cpp
     auth/workspaces.cpp

@@ -4,6 +4,7 @@
 #include "app/fake/fake_backend.h"
 #include "app/i18n/languages.h"
 #include "base/i18n.h"
+#include "app/model/downloads.h"
 #include "app/model/jobs.h"
 #include "app/mrkdwn/emoji.h"
 #include "app/spell/spell.h"
@@ -1059,6 +1060,54 @@ ui::View *findView(ui::View *v, const std::function<bool(ui::View *)> &match) {
     return nullptr;
 }
 } // namespace
+
+TEST("downloads: the tray shows progress, then Show in Finder, and goes when dismissed") {
+    Harness h;
+    auto   &list = model::downloads();
+    for (const auto &it : std::vector(list.items()))
+        list.remove(it.id);
+    const std::string dir  = app().platform().standardDir(plat::StandardDir::Downloads);
+    const std::string path = file::join(dir, "report.pdf");
+    REQUIRE(file::writeAtomic(path, "%PDF"));
+    const auto label = [&](std::string_view needle) {
+        ui::Popup *tray = h.win->topPopup();
+        return tray ? findView(
+                          tray,
+                          [&](ui::View *v) {
+                              return v->accessibleName().find(needle) != std::string::npos;
+                          }
+                      )
+                    : nullptr;
+    };
+    const int id = list.begin("report.pdf", path);
+    pump();
+    REQUIRE(h.win->topPopup() != nullptr); // non-modal, bottom right
+    CHECK_FALSE(h.win->topPopup()->modal());
+    CHECK(label("report.pdf") != nullptr);
+    CHECK(label("Downloading") != nullptr);
+    list.progress(id, 1024 * 1024, 4 * 1024 * 1024);
+    pump();
+    CHECK(label(" of ") != nullptr);
+    list.finish(id, true);
+    pump();
+    CHECK(label(" of ") == nullptr);
+    auto *show = static_cast<ui::Button *>(findView(h.win->topPopup(), [](ui::View *v) {
+        return v->accessibleName() == "Show in Finder" || v->accessibleName() == "Show in folder";
+    }));
+    REQUIRE(show != nullptr);
+    show->onClick();
+    std::string url;
+    REQUIRE(app().platform().testHooks()->lastOpenedUrl(&url));
+    CHECK(str::startsWith(url, "file://") && url.find("downloads") != std::string::npos);
+    // ×: the card goes, and with the last one the tray.
+    auto *x = findView(h.win->topPopup(), [](ui::View *v) { return v->tooltip() == "Dismiss"; });
+    REQUIRE(x != nullptr);
+    static_cast<ui::Clickable *>(x)->onClick();
+    pump();
+    CHECK(list.items().empty());
+    CHECK(h.win->topPopup() == nullptr);
+    file::remove(path);
+}
 
 TEST("schedule send: the date-time picker, an hour out; a thread reply stays in its thread") {
     Harness       h;

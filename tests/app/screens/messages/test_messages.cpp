@@ -7,6 +7,7 @@
 #include "app/llm/service.h"
 #include "app/media/audio_player.h"
 #include "support/fake_llm_server.h"
+#include "app/model/downloads.h"
 #include "app/model/jobs.h"
 #include "app/screens/common/avatar_initial.h"
 #include "app/screens/common/icon_button.h"
@@ -154,14 +155,21 @@ struct DownloadingBackend : fake::FakeBackend {
         c.messageReminders = reminders;
         return c;
     }
-    void downloadFile(const std::string &url, std::string toPath, Done done) override {
+    void downloadFile(
+        const std::string &url, std::string toPath, Done done, Progress progress = {}
+    ) override {
         asked.push_back({url, toPath});
-        const size_t at = url.find(".test/");
-        std::string  body;
-        const bool   ok = at != std::string::npos &&
-                          file::readAll(asset(url.substr(at + 6).c_str()), &body) &&
-                          file::writeAtomic(toPath, body);
-        app().platform().post([done, ok] { done(ok, ok ? "" : "http 404"); });
+        const size_t  at = url.find(".test/");
+        std::string   body;
+        const bool    ok = at != std::string::npos &&
+                           file::readAll(asset(url.substr(at + 6).c_str()), &body) &&
+                           file::writeAtomic(toPath, body);
+        const int64_t n  = int64_t(body.size());
+        app().platform().post([done, ok, progress, n] {
+            if (ok && progress)
+                progress(n / 2, n); // halfway, as the network reports it
+            done(ok, ok ? "" : "http 404");
+        });
     }
 };
 
@@ -233,6 +241,16 @@ ui::View *findByTooltip(ui::View *v, std::string_view needle) {
         return v;
     for (size_t i = 0; i < v->childCount(); ++i)
         if (ui::View *f = findByTooltip(v->child(i), needle))
+            return f;
+    return nullptr;
+}
+
+// The view whose tooltip is exactly `tip` ("Forward", not "Forward message").
+ui::View *findByExactTooltip(ui::View *v, std::string_view tip) {
+    if (v->tooltip() == tip)
+        return v;
+    for (size_t i = 0; i < v->childCount(); ++i)
+        if (ui::View *f = findByExactTooltip(v->child(i), tip))
             return f;
     return nullptr;
 }
@@ -1758,8 +1776,9 @@ TEST("actions: a shared message's files open in the viewer, never deleted or for
     pump(2);
     ui::Popup *viewer = e.win->topPopup();
     REQUIRE(viewer != nullptr);
-    ui::View *download = findByTooltip(viewer, "Download");
-    ui::View *forward  = findByTooltip(viewer, "Forward");
+    // The viewer's own buttons (its thread panel has "Forward message").
+    ui::View *download = findByExactTooltip(viewer, "Download");
+    ui::View *forward  = findByExactTooltip(viewer, "Forward");
     REQUIRE(download != nullptr);
     REQUIRE(forward != nullptr);
     CHECK(download->visible());
@@ -2270,46 +2289,173 @@ TEST("image: \"Copy full image\" of a Slack-hosted image copies the original, no
     wipe(dir);
 }
 
-TEST("actions: the file bar's Download saves the original where asked, a job until written") {
-    const std::string dir = tempDir("download");
+TEST("actions: Download saves the original into Downloads, numbered, with progress") {
+    Env           e(true);
+    const ConvRef general = e.conv("C0GENERAL");
+    Ts            ts      = 0;
+    std::string   path;
+    for (model::Message &m : e.store.conversation(general).messages)
+        for (model::File &f : m.extras().files)
+            if (f.name == "signups-week-37.csv") {
+                ts     = m.ts;
+                f.path = path = "https://files.csv.test/transcodes/signups.bin";
+                f.original    = "https://files.csv.test/files/signups-week-37.csv";
+            }
+    REQUIRE(ts != 0);
+    e.list->showConversation(general);
+    pump(10);
+    const std::string dir = app().platform().standardDir(plat::StandardDir::Downloads);
+    REQUIRE(!dir.empty());
+    const std::string first = file::join(dir, "signups-week-37.csv");
+    const std::string again = file::join(dir, "signups-week-37 (1).csv");
+    file::remove(first);
+    file::remove(again);
+    auto &list = model::downloads();
+    for (const auto &it : std::vector(list.items()))
+        list.remove(it.id);
+    // No dialog: straight into Downloads, listed for the tray, a job too.
+    e.list->downloadFile(ts, path);
+    REQUIRE(list.items().size() == 1);
+    CHECK_STR(list.items()[0].name, "signups-week-37.csv");
+    CHECK_STR(list.items()[0].path, first);
+    CHECK(list.items()[0].state == model::Downloads::State::Running);
+    REQUIRE(model::jobs().count() == 1);
+    CHECK_STR(model::jobs().descriptions()[0], "Downloading signups-week-37.csv");
+    REQUIRE(until([&] { return model::jobs().count() == 0; }));
+    CHECK(list.items()[0].state == model::Downloads::State::Done);
+    CHECK(list.items()[0].total > 0); // the progress reached it
+    CHECK(list.items()[0].received == list.items()[0].total);
+    REQUIRE(e.backend.asked.size() == 1);
+    CHECK_STR(e.backend.asked[0].url, "https://files.csv.test/files/signups-week-37.csv");
+    std::string want, got;
+    REQUIRE(file::readAll(asset("files/signups-week-37.csv"), &want));
+    REQUIRE(file::readAll(first, &got));
+    CHECK(got == want);
+    // Again: the name is taken, so " (1)".
+    e.list->downloadFile(ts, path);
+    REQUIRE(list.items().size() == 2);
+    CHECK_STR(list.items()[1].path, again);
+    REQUIRE(until([&] { return model::jobs().count() == 0; }));
+    CHECK(file::exists(again));
+    file::remove(first);
+    file::remove(again);
+    for (const auto &it : std::vector(list.items()))
+        list.remove(it.id);
+}
+
+TEST(
+    "rich: a Markdown file preview renders headings, emphasis, code, lists, quotes, rules and links"
+) {
+    std::vector<std::string>   links;
+    const text::AttributedText t = markdownPreviewText(
+        "# Title #\n"
+        "Some **bold**, *it*, ~~gone~~ and `code`,\n"
+        "joined; snake_case stays.\n"
+        "\n"
+        "- one\n"
+        "  - [x] done\n"
+        "2) two\n"
+        "> said\n"
+        "---\n"
+        "```js\n"
+        "let a = 1;\n"
+        "```\n"
+        "| a | b |\n"
+        "|---|---|\n"
+        "See [docs](https://x.test/d) and <https://y.test>, \\*not italic\\*.",
+        &links
+    );
+    CHECK_STR(
+        t.text,
+        "Title\n"
+        "Some bold, it, gone and code, joined; snake_case stays.\n\n"
+        "\xE2\x80\xA2 one\n"
+        "    \xE2\x98\x91 done\n"
+        "2. two\n"
+        "\xE2\x96\x8E said\n\n"
+        "\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80"
+        "\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\xE2\x94\x80\n"
+        "let a = 1;\n"
+        "| a | b |\n"
+        "See docs and https://y.test, *not italic*."
+    );
+    REQUIRE(links.size() == 2);
+    CHECK_STR(links[0], "https://x.test/d");
+    CHECK_STR(links[1], "https://y.test");
+    // The style at a byte of the text.
+    const auto at = [&](std::string_view needle) {
+        const uint32_t off = uint32_t(t.text.find(needle));
+        for (const text::Span &sp : t.spans)
+            if (off >= sp.start && off < sp.end)
+                return sp.style;
+        return text::Style{};
+    };
+    CHECK(at("Title").weight == text::Weight::Bold);
+    CHECK(at("Title").size > at("Some").size);
+    CHECK(at("bold").weight == text::Weight::Bold);
+    CHECK(at("it,").italic);
+    CHECK(at("gone").strike);
+    CHECK(at("code,").mono);
+    CHECK(at("let a").mono);
+    CHECK_FALSE(at("snake").italic);
+    CHECK(at("docs").linkId == 1);
+    CHECK(at("https://y").linkId == 2);
+}
+
+TEST("actions: a file card click downloads (Download tooltip), a Markdown one opens its preview") {
+    const std::string dir = tempDir("chips");
     {
-        Env           e(true);
-        const ConvRef general = e.conv("C0GENERAL");
-        Ts            ts      = 0;
-        std::string   path;
-        for (model::Message &m : e.store.conversation(general).messages)
-            for (model::File &f : m.extras().files)
-                if (f.name == "signups-week-37.csv") {
-                    ts     = m.ts;
-                    f.path = path = "https://files.csv.test/transcodes/signups.bin";
-                    f.original    = "https://files.csv.test/files/signups-week-37.csv";
-                }
-        REQUIRE(ts != 0);
-        e.list->showConversation(general);
-        pump(10);
-        auto             *hooks = app().platform().testHooks();
-        const std::string to    = file::join(dir, "saved.csv");
-        REQUIRE(hooks->fileDialogRespond({to}));
-        e.list->downloadFile(ts, path);
-        REQUIRE(until([&] { return model::jobs().count() == 1; }));
-        CHECK_STR(model::jobs().descriptions()[0], "Downloading signups-week-37.csv");
-        plat::FileDialogDesc d;
-        REQUIRE(hooks->lastFileDialog(&d));
-        CHECK_STR(d.suggestedName, "signups-week-37.csv");
-        CHECK_STR(d.initialDir, app().platform().standardDir(plat::StandardDir::Home));
+        Env               e(false);
+        const std::string md = file::join(dir, "notes.md");
+        REQUIRE(file::writeAtomic(md, "# Notes\n\n- first\n"));
+        const int64_t  t0 = base::nowSecs() - 3600;
+        model::Message m  = msg(e.store.findUser("U0MIRA"), t0, "files");
+        model::File    zip;
+        zip.id   = "FZIP";
+        zip.name = "archive.zip";
+        zip.mime = "application/zip";
+        zip.path = "https://files.csv.test/files/archive.zip";
+        model::File note;
+        note.id          = "FMD";
+        note.name        = "notes.md";
+        note.mime        = "text/markdown";
+        note.path        = md;
+        m.extras().files = {zip, note};
+        std::vector<model::Message> ms;
+        ms.push_back(std::move(m));
+        e.list->showConversation(addConv(e.store, std::move(ms)));
+        pump(8);
+        const Ts ts = t0 * 1000000;
+        // The ⋯ menu offers Preview for the Markdown file, not for the zip.
+        CHECK(menuLabels(e.list->fileMenuItems(ts, md)).rfind("Preview|", 0) == 0);
+        CHECK(menuLabels(e.list->fileMenuItems(ts, zip.path)).find("Preview") == std::string::npos);
+        // The zip: "Download archive.zip", and a click downloads it into
+        // Downloads (this one is missing on the server: it fails).
+        auto *zipChip = static_cast<ui::Clickable *>(findByTooltip(e.list, "Download archive.zip"));
+        REQUIRE(zipChip != nullptr);
+        auto &list = model::downloads();
+        for (const auto &it : std::vector(list.items()))
+            list.remove(it.id);
+        zipChip->onClick();
+        REQUIRE(list.items().size() == 1);
+        CHECK_STR(list.items()[0].name, "archive.zip");
+        CHECK(
+            str::startsWith(
+                list.items()[0].path, app().platform().standardDir(plat::StandardDir::Downloads)
+            )
+        );
         REQUIRE(until([&] { return model::jobs().count() == 0; }));
-        REQUIRE(e.backend.asked.size() == 1);
-        CHECK_STR(e.backend.asked[0].url, "https://files.csv.test/files/signups-week-37.csv");
-        std::string want, got;
-        REQUIRE(file::readAll(asset("files/signups-week-37.csv"), &want));
-        REQUIRE(file::readAll(to, &got));
-        CHECK(got == want);
-        // Cancelled: no job, no download.
-        REQUIRE(hooks->fileDialogRespond({}));
-        e.list->downloadFile(ts, path);
-        pump(6);
-        CHECK(model::jobs().count() == 0);
-        CHECK(e.backend.asked.size() == 1);
+        CHECK(list.items()[0].state == model::Downloads::State::Failed);
+        list.remove(list.items()[0].id);
+        // The Markdown file: "Preview notes.md", a click renders it.
+        auto *mdChip = static_cast<ui::Clickable *>(findByTooltip(e.list, "Preview notes.md"));
+        REQUIRE(mdChip != nullptr);
+        mdChip->onClick();
+        REQUIRE(until([&] { return e.win->topPopup() != nullptr; }));
+        ui::Popup *viewer = e.win->topPopup();
+        CHECK(findByTooltip(viewer, "Download") != nullptr);
+        viewer->close();
+        pump(2);
     }
     wipe(dir);
 }

@@ -1,6 +1,7 @@
 #include "screens/shell/shell.h"
 
 #include "app/llm/service.h"
+#include "app/model/downloads.h"
 #include "app/llm/voice_input.h"
 #include "app/media/sounds.h"
 #include "app/mrkdwn/emoji.h"
@@ -20,6 +21,7 @@
 #include "screens/shell/canvas_viewer.h"
 #include "screens/shell/channel_dialogs.h"
 #include "screens/shell/context_menus.h"
+#include "screens/shell/downloads_tray.h"
 #include "screens/shell/header.h"
 #include "screens/shell/huddle_banner.h"
 #include "screens/shell/nav_chrome.h"
@@ -898,6 +900,7 @@ Shell::Shell(
 #ifdef MSGA_SELF_UPDATE
     _updateBar            = screen->add<UpdateBar>();
     _updateBar->onRestart = [this] { applyUpdate(); };
+    _downloadsObserver    = model::downloads().observe([this] { syncDownloads(); });
 #endif
     auto *body = screen->add<View>();
     body->style().row().flex(1);
@@ -1325,6 +1328,9 @@ void Shell::runCommand(ConvRef conv, Ts thread, const std::string &name, const s
 }
 
 Shell::~Shell() {
+    model::downloads().unobserve(_downloadsObserver);
+    if (_downloadsTray)
+        _downloadsTray->onClosed = nullptr;
     _ctx.app.cancelTimer(_errorTimer);
     for (plat::TimerId id : _resolveTimers)
         _ctx.app.cancelTimer(id);
@@ -1920,6 +1926,31 @@ void Shell::workspaceChanged() {
     updateHeader();
     _sidebar->footer().setZenOn(_settings.zenMode(_activeKey)); // its own
     loadSorts();
+}
+
+// The tray follows the list: shown with the first download, rebuilt on each
+// change, closed when the last card is dismissed. A turn later, as a card's
+// own × changes the list from inside the tray.
+void Shell::syncDownloads() {
+    if (std::exchange(_downloadsPosted, true))
+        return;
+    std::weak_ptr<int> alive = _agentAlive;
+    _ctx.app.platform().post([this, alive] {
+        if (alive.expired())
+            return;
+        _downloadsPosted = false;
+        const bool any   = !model::downloads().items().empty();
+        if (any && !_downloadsTray) {
+            auto tray      = std::make_unique<DownloadsTray>(_ctx);
+            _downloadsTray = tray.get();
+            tray->onClosed = [this] { _downloadsTray = nullptr; };
+            _win.showPopup(std::move(tray));
+        } else if (!any && _downloadsTray) {
+            _downloadsTray->close();
+        } else if (_downloadsTray) {
+            _downloadsTray->rebuild();
+        }
+    });
 }
 
 void Shell::open(ConvRef conv) {

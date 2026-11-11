@@ -11,11 +11,16 @@
 //   Table viewer     a CSV (≤ 400 rows) or a message's table as a data
 //                    table on the viewer backdrop; Esc or a click outside
 //                    closes it
+//   Markdown viewer  a Markdown file rendered (headings, emphasis, code,
+//                    lists, quotes, links) in a scrolling card, the same way
 #pragma once
 
 #include "app/screens/messages/context_fwd.h"
+#include "text/text.h"
 
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace screens {
@@ -38,6 +43,20 @@ ui::Popup *showTableViewer(ui::Window &w, std::vector<std::vector<std::string>> 
 // every row, rich as in the message.
 ui::Popup *
 showTableViewer(ui::Window &w, Context &ctx, std::vector<std::vector<std::string>> cells);
+// Markdown as styled text, one line of the source to one line here
+// (a paragraph's lines joined): # headings, **bold** *italic* ~~strike~~
+// `code`, ``` blocks, - / 1. / - [ ] lists, > quotes, --- rules, [t](url)
+// and <url> links (linkId i opens (*links)[i - 1]). Themed colours.
+text::AttributedText markdownPreviewText(std::string_view md, std::vector<std::string> *links);
+// A Markdown file's text in the viewer: `download` is its Download button
+// (none when empty); links open in the browser.
+ui::Popup           *showMarkdownViewer(
+    ui::Window           &w,
+    Context              &ctx,
+    std::string           title,
+    std::string_view      md,
+    std::function<void()> download
+);
 // A CSV file read and parsed: disk and CPU work for a worker thread
 // (model::runInBackground); no UI text. No rows when unreadable.
 std::vector<std::vector<std::string>> readCsvFile(const std::string &path);

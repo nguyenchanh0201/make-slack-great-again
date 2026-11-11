@@ -1582,7 +1582,10 @@ public:
     int                      uploads    = 0;
     bool                     fileUpload = true;
 
-    void downloadFile(const std::string &url, std::string toPath, Done done) override {
+    void downloadFile(
+        const std::string &url, std::string toPath, Done done, Progress progress = {}
+    ) override {
+        (void)progress;
         downloads.push_back({url, std::move(toPath), std::move(done)});
     }
     void sendWithFiles(

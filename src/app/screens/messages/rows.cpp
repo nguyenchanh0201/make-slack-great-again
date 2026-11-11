@@ -1588,12 +1588,27 @@ void MessageRow::buildFile(ui::View *col, const model::File &f, Ts ts) {
     }
     auto *chip = col->add<FileChip>(ts ? &_list : nullptr, ts, f);
     chip->style().alignSelf(Align::Start).margins(0, 6, 0, 0);
-    const model::File file = f;
+    const model::File file    = f;
     // A chip click: an HTML file renders in the browser (fetched to a
-    // local copy), anything else opens its Slack page (else the file).
-    chip->onClick          = [this, file] {
-        if (file.isHtml() && !file.path.empty())
+    // local copy), a CSV or Markdown file opens its preview, anything else
+    // downloads (the bar's Download); without a message, its Slack page.
+    const bool        html    = file.isHtml() && !file.path.empty();
+    const bool        preview = !html && MessageList::canPreview(file);
+    const bool        save    = !html && !preview && ts;
+    const std::string name    = file.name.empty() ? std::string(tr("file")) : file.name;
+    chip->setTooltip(
+        html      ? arg(tr("Open %1"), name)
+        : preview ? arg(tr("Preview %1"), name)
+        : save    ? arg(tr("Download %1"), name)
+                  : std::string()
+    );
+    chip->onClick = [this, file, ts, html, preview, save] {
+        if (html)
             _list.openHtmlFile(file);
+        else if (preview)
+            _list.openPreview(file, ts);
+        else if (save)
+            _list.downloadFile(ts, file.path);
         else if (_list.ctx().openUrl) {
             const std::string &url = file.permalink.empty() ? file.path : file.permalink;
             if (!url.empty())

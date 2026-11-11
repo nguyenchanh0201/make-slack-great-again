@@ -774,6 +774,10 @@ msgstr "旗"
 msgid "Tomorrow"
 msgstr "明日"
 
+#: src/app/screens/common/downloads.cpp src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp src/app/update/updater.cpp
+msgid "Downloading %1"
+msgstr "%1をダウンロード中"
+
 #: src/app/screens/common/file_dialogs.cpp
 msgid "Attach files"
 msgstr "ファイルを添付"
@@ -817,10 +821,6 @@ msgstr "一時停止"
 #: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
 msgid "Play"
 msgstr "再生"
-
-#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp src/app/update/updater.cpp
-msgid "Downloading %1"
-msgstr "%1をダウンロード中"
 
 #: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
 msgid "Download failed"
@@ -938,6 +938,14 @@ msgstr "このファイルは空です"
 msgid "Showing the first %1 of %2 rows"
 msgstr "全%2行のうち最初の%1行を表示しています"
 
+#: src/app/screens/messages/message_dialogs.cpp src/app/screens/messages/message_list.cpp
+msgid "Download"
+msgstr "ダウンロード"
+
+#: src/app/screens/messages/message_dialogs.cpp src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp src/app/screens/shell/sidebar.cpp
+msgid "Close"
+msgstr "閉じる"
+
 #: src/app/screens/messages/message_list.cpp src/app/screens/messages/rows.cpp
 msgid "Loading image…"
 msgstr "画像を読み込み中…"
@@ -949,10 +957,6 @@ msgstr ""
 #: src/app/screens/messages/message_list.cpp
 msgid "Next image"
 msgstr ""
-
-#: src/app/screens/messages/message_list.cpp
-msgid "Download"
-msgstr "ダウンロード"
 
 #: src/app/screens/messages/message_list.cpp src/app/screens/shell/shell_dialogs.cpp
 msgid "Forward"
@@ -969,10 +973,6 @@ msgstr "その他の操作"
 #: src/app/screens/messages/message_list.cpp src/app/screens/messages/thread_panel.cpp src/app/screens/shell/shell.cpp
 msgid "Thread"
 msgstr "スレッド"
-
-#: src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp src/app/screens/shell/sidebar.cpp
-msgid "Close"
-msgstr "閉じる"
 
 #: src/app/screens/messages/message_list.cpp
 msgid "Loading video…"
@@ -1026,7 +1026,7 @@ msgstr "エージェントに質問"
 msgid "Share"
 msgstr "共有"
 
-#: src/app/screens/messages/message_list.cpp
+#: src/app/screens/messages/message_list.cpp src/app/screens/messages/rows.cpp
 msgid "file"
 msgstr "ファイル"
 
@@ -1330,6 +1330,18 @@ msgstr "リマインダー — %1"
 #: src/app/screens/messages/rows.cpp src/app/screens/shell/saved_page.cpp
 msgid "Saved for later"
 msgstr "後で見るために保存済み"
+
+#: src/app/screens/messages/rows.cpp
+msgid "Open %1"
+msgstr "%1 を開く"
+
+#: src/app/screens/messages/rows.cpp
+msgid "Preview %1"
+msgstr "%1 をプレビュー"
+
+#: src/app/screens/messages/rows.cpp
+msgid "Download %1"
+msgstr "%1 をダウンロード"
 
 #: src/app/screens/messages/rows.cpp
 msgid "Show less"
@@ -2939,6 +2951,34 @@ msgstr "%1からログアウト"
 msgid "Sort"
 msgstr "並べ替え"
 
+#: src/app/screens/shell/downloads_tray.cpp src/app/screens/shell/voice_strip.cpp
+msgid "Dismiss"
+msgstr "閉じる"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "%1 of %2"
+msgstr "%1 / %2"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Downloading…"
+msgstr "ダウンロード中…"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Downloaded"
+msgstr "ダウンロード済み"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Couldn't download: %1"
+msgstr "ダウンロードできませんでした: %1"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Show in Finder"
+msgstr "Finder で表示"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Show in folder"
+msgstr "フォルダで表示"
+
 #: src/app/screens/shell/gif_search.cpp
 msgid "GIPHY rate limit reached. Try again shortly."
 msgstr "GIPHYのレート制限に達しました。しばらくしてからもう一度お試しください。"
@@ -3949,10 +3989,6 @@ msgstr "今すぐ再起動"
 #: src/app/screens/shell/voice_strip.cpp
 msgid "Cancel voice input (Esc)"
 msgstr "音声入力をキャンセル（Esc）"
-
-#: src/app/screens/shell/voice_strip.cpp
-msgid "Dismiss"
-msgstr "閉じる"
 
 #: src/app/screens/shell/voice_strip.cpp
 msgid "Esc to cancel"

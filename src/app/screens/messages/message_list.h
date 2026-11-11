@@ -222,15 +222,18 @@ public:
     // them) and outlive the list.
     void downloadFile(Ts ts, const std::string &path); // the bar's Download
     void copyImage(const model::File &f);              // "Copy full image"
-    void openCsvPreview(const model::File &f);         // "Preview" (the table viewer)
-    void openReactionPicker(Ts ts, ui::RectF anchorWindowRect);
-    void openImage(const std::string &path, int w, int h);
+    // "Preview": a CSV in the table viewer, Markdown rendered (canPreview);
+    // ts: the message, for the viewer's Download (0: none).
+    void openPreview(const model::File &f, Ts ts = 0);
+    static bool canPreview(const model::File &f);
+    void        openReactionPicker(Ts ts, ui::RectF anchorWindowRect);
+    void        openImage(const std::string &path, int w, int h);
     // A message's button (MessageExtras::buttons) pressed: Backend::
     // pressButton, then a toast at the button ("Sent to the app", or
     // "Couldn't press the button: …").
-    void pressButton(Ts ts, const std::string &buttonId, ui::PointF windowPos);
-    void showToast(const std::string &text, int ms, ui::PointF windowPos);
-    void reply(Ts ts);
+    void        pressButton(Ts ts, const std::string &buttonId, ui::PointF windowPos);
+    void        showToast(const std::string &text, int ms, ui::PointF windowPos);
+    void        reply(Ts ts);
 
     // ── Internal (rows): state the rows read and the actions they take ─────
     void               applySelection(MessageRow &row) const;

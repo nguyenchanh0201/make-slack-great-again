@@ -1139,10 +1139,13 @@ void SlackBackend::react(ConvRef conv, Ts ts, std::string_view name, bool add) {
 // for session auth, its d cookie), then written to disk on a worker. Slack
 // answers a request it doesn't accept with its sign-in page (HTML, 200):
 // that is a failure, not the file.
-void SlackBackend::downloadFile(const std::string &url, std::string toPath, Done done) {
+void SlackBackend::downloadFile(
+    const std::string &url, std::string toPath, Done done, Progress progress
+) {
     net::Request req;
-    req.url       = url;
-    req.timeoutMs = kUploadTimeoutMs;
+    req.url        = url;
+    req.timeoutMs  = kUploadTimeoutMs;
+    req.onProgress = std::move(progress);
     addAuthHeaders(req.headers, _auth);
     // Held here too: a workspace switch (our destructor) cancels the
     // transfer and still answers it, so the caller's background job ends.
