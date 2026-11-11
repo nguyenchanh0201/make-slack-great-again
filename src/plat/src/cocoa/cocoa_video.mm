@@ -94,7 +94,15 @@ CocoaVideoPlayer::CocoaVideoPlayer(plat::Window *window) : _window(window) {
     _playerLayer.hidden = YES;
 
     if (_window) {
-        NSWindow *nswin = (__bridge NSWindow *)_window->nativeHandle();
+        // Only one of the app's own windows: another backend's handle
+        // (headless: a C++ object) is no NSWindow and must not be messaged.
+        NSWindow   *nswin  = nil;
+        const void *handle = _window->nativeHandle();
+        for (NSWindow *w in NSApp.windows)
+            if ((__bridge const void *)w == handle) {
+                nswin = w;
+                break;
+            }
         if (nswin && nswin.contentView) {
             NSView *contentView = nswin.contentView;
             if (!contentView.layer)
