@@ -64,7 +64,7 @@ msgstr "表示"
 msgid "Hide"
 msgstr "非表示"
 
-#: src/ui/controls.cpp src/ui/filebrowser.cpp src/app/screens/messages/message_dialogs.cpp src/app/screens/settings/settings_pages.cpp src/app/screens/shell/composer.cpp src/app/screens/shell/composer_popups.cpp src/app/screens/shell/scheduled_page.cpp src/app/screens/shell/session_dialogs.cpp src/app/screens/shell/shell_dialogs.cpp src/app/screens/shell/signin_dialogs.cpp src/app/screens/shell/status_dialog.cpp
+#: src/ui/controls.cpp src/ui/filebrowser.cpp src/app/screens/messages/message_dialogs.cpp src/app/screens/settings/settings_pages.cpp src/app/screens/shell/composer.cpp src/app/screens/shell/composer_popups.cpp src/app/screens/shell/downloads_tray.cpp src/app/screens/shell/scheduled_page.cpp src/app/screens/shell/session_dialogs.cpp src/app/screens/shell/shell_dialogs.cpp src/app/screens/shell/signin_dialogs.cpp src/app/screens/shell/status_dialog.cpp
 msgid "Cancel"
 msgstr "キャンセル"
 
@@ -72,7 +72,7 @@ msgstr "キャンセル"
 msgid "Open file"
 msgstr "ファイルを開く"
 
-#: src/ui/filebrowser.cpp
+#: src/ui/filebrowser.cpp src/app/screens/shell/downloads_tray.cpp
 msgid "Open"
 msgstr "開く"
 
@@ -814,7 +814,7 @@ msgstr "AIで文字起こし"
 msgid "View transcript"
 msgstr "文字起こしを表示"
 
-#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp
+#: src/app/screens/messages/audio_card.cpp src/app/screens/messages/message_list.cpp src/app/screens/shell/downloads_tray.cpp
 msgid "Pause"
 msgstr "一時停止"
 
@@ -938,6 +938,14 @@ msgstr "このファイルは空です"
 msgid "Showing the first %1 of %2 rows"
 msgstr "全%2行のうち最初の%1行を表示しています"
 
+#: src/app/screens/messages/message_dialogs.cpp src/app/screens/messages/message_list.cpp src/app/screens/messages/rows.cpp
+msgid "Loading image…"
+msgstr "画像を読み込み中…"
+
+#: src/app/screens/messages/message_dialogs.cpp
+msgid "Image unavailable"
+msgstr "画像を表示できません"
+
 #: src/app/screens/messages/message_dialogs.cpp src/app/screens/messages/message_list.cpp
 msgid "Download"
 msgstr "ダウンロード"
@@ -945,10 +953,6 @@ msgstr "ダウンロード"
 #: src/app/screens/messages/message_dialogs.cpp src/app/screens/messages/message_list.cpp src/app/screens/settings/settings_dialog.cpp src/app/screens/shell/canvas_viewer.cpp src/app/screens/shell/session_status_dialog.cpp src/app/screens/shell/shell.cpp src/app/screens/shell/sidebar.cpp
 msgid "Close"
 msgstr "閉じる"
-
-#: src/app/screens/messages/message_list.cpp src/app/screens/messages/rows.cpp
-msgid "Loading image…"
-msgstr "画像を読み込み中…"
 
 #: src/app/screens/messages/message_list.cpp
 msgid "Previous image"
@@ -2964,12 +2968,24 @@ msgid "Downloading…"
 msgstr "ダウンロード中…"
 
 #: src/app/screens/shell/downloads_tray.cpp
+msgid "Paused"
+msgstr "一時停止中"
+
+#: src/app/screens/shell/downloads_tray.cpp
 msgid "Downloaded"
 msgstr "ダウンロード済み"
 
 #: src/app/screens/shell/downloads_tray.cpp
 msgid "Couldn't download: %1"
 msgstr "ダウンロードできませんでした: %1"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Resume"
+msgstr "再開"
+
+#: src/app/screens/shell/downloads_tray.cpp
+msgid "Retry"
+msgstr "再試行"
 
 #: src/app/screens/shell/downloads_tray.cpp
 msgid "Show in Finder"

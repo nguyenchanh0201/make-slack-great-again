@@ -18,18 +18,24 @@ namespace model {
 
 class Downloads {
 public:
-    enum class State : uint8_t { Running, Done, Failed };
+    enum class State : uint8_t { Running, Paused, Done, Failed };
     struct Item {
         int         id = 0;
-        std::string name;                    // as shown ("report.pdf")
-        std::string path;                    // where it is written
+        std::string name;   // as shown ("report.pdf")
+        std::string path;   // where it is written
+        std::string kind;   // its type as the service names it ("Markdown (raw)"); may be ""
+        std::string source; // what is fetched (a URL or a local file), for a resume
         int64_t     received = 0, total = 0; // bytes; total 0 = unknown
         State       state = State::Running;
         std::string error; // Failed: why
     };
 
-    int                      begin(std::string name, std::string path);
-    // These three are safe with an unknown or removed id.
+    int  begin(std::string name, std::string path, std::string kind = {}, std::string source = {});
+    // These are safe with an unknown or removed id. pause: a running one
+    // stops where it is; restart: a paused or failed one runs again from
+    // the start (false when it can't).
+    bool pause(int id);
+    bool restart(int id);
     void                     progress(int id, int64_t received, int64_t total);
     void                     finish(int id, bool ok, std::string error = {});
     void                     remove(int id); // dismissed from the tray

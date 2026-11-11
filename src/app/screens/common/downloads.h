@@ -43,8 +43,17 @@ void        startDownload(
     model::Backend    &backend,
     std::string        name,
     const std::string &source,
-    std::string        toPath
+    std::string        toPath,
+    std::string        kind = {} // the tray's type line ("Markdown (raw)")
 );
+
+// The tray's controls over a listed download (model::downloads() id): pause
+// stops the transfer and keeps the card; resume (also a failed one's Retry)
+// starts it again; cancel stops it and drops the card.
+void runDownload(plat::App &app, model::Backend &backend, int id);
+void pauseDownload(model::Backend &backend, int id);
+void resumeDownload(plat::App &app, model::Backend &backend, int id);
+void cancelDownload(model::Backend &backend, int id);
 
 // A fresh path for a downloaded copy of `name` under the OS temp directory
 // (<Temp>/msga/downloads/<random>/<name>, the directory created), so

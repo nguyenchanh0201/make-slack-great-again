@@ -1448,19 +1448,20 @@ void MessageList::downloadFile(Ts ts, const std::string &path) {
         return;
     const std::string name      = f->name.empty() ? std::string(tr("file")) : f->name;
     const std::string source    = f->source();
+    const std::string kind      = f->prettyType;
     plat::App        &pa        = _ctx.app.platform();
     const std::string downloads = pa.standardDir(plat::StandardDir::Downloads);
     if (!downloads.empty() && (file::isDir(downloads) || file::makeDirs(downloads))) {
-        startDownload(pa, _ctx.backend, name, source, uniqueDownloadPath(downloads, name));
+        startDownload(pa, _ctx.backend, name, source, uniqueDownloadPath(downloads, name), kind);
         return;
     }
     Context &ctx = _ctx; // outlives the list; the download may outlive it
     screens::saveFile(
         _ctx,
         name,
-        [&ctx, name, source](std::string to) {
+        [&ctx, name, source, kind](std::string to) {
             if (!to.empty())
-                startDownload(ctx.app.platform(), ctx.backend, name, source, std::move(to));
+                startDownload(ctx.app.platform(), ctx.backend, name, source, std::move(to), kind);
         },
         pa.standardDir(plat::StandardDir::Home)
     );
@@ -3013,7 +3014,7 @@ void MessageList::openPreview(const model::File &f, Ts ts) {
                 if (temp)
                     removeTempDownload(local);
             },
-            [this, alive, rows, text, job, csv, name, ts, path] {
+            [this, alive, rows, text, job, csv, name, ts, path, local, temp] {
                 model::jobs().end(job);
                 if (alive.expired() || !window())
                     return;
@@ -3025,10 +3026,19 @@ void MessageList::openPreview(const model::File &f, Ts ts) {
                 // viewer that pages would show the rest.
                 if (text->size() > 512 * 1024)
                     text->resize(utf8::prevBoundary(*text, 512 * 1024));
-                showMarkdownViewer(*window(), _ctx, name, *text, [this, alive, ts, path] {
-                    if (!alive.expired() && ts)
-                        downloadFile(ts, path);
-                });
+                // A local file's images may be relative to its folder; a
+                // downloaded copy's can't be found.
+                showMarkdownViewer(
+                    *window(),
+                    _ctx,
+                    name,
+                    *text,
+                    [this, alive, ts, path] {
+                        if (!alive.expired() && ts)
+                            downloadFile(ts, path);
+                    },
+                    temp ? std::string_view() : file::dirName(local)
+                );
             }
         );
     };

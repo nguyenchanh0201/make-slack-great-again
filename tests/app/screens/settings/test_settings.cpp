@@ -197,8 +197,10 @@ TEST("settings: every value survives the file, which is owner-only") {
     CHECK(def.useTray);
     CHECK(def.notifications);
     CHECK(def.fontSize == 1);
-    CHECK(def.paletteLight == int(ui::Palette::Purple));
-    CHECK(def.paletteDark == int(ui::Palette::Charcoal));
+    CHECK(def.paletteLight == int(ui::Palette::Custom)); // Raspberry Beret
+    CHECK(def.paletteDark == int(ui::Palette::Custom));
+    CHECK(def.custom.primary == ui::raspberryBeret().primary);
+    CHECK(def.custom.itemText == ui::raspberryBeret().itemText);
     CHECK(def.relevantDays == 14);
     CHECK(def.names == 0); // as set in Slack
     CHECK(def.cacheLimitMb == 250);

@@ -32,6 +32,7 @@ public:
     void setNotifyLevel(ConvRef c, NotifyLevel level) override;
     void leave(ConvRef c) override;
     void openDm(UserRef u, std::function<void(ConvRef)> done) override;
+    void reopen(ConvRef c) override;
     void joinChannel(ConvRef c, ConvDone done) override;
     void createChannel(std::string name, bool isPrivate, ConvDone done) override;
     void loadChannelDirectory() override;
@@ -39,6 +40,7 @@ public:
     void setSaved(ConvRef c, Ts ts, bool on) override;
     void deleteFile(ConvRef c, Ts ts, const std::string &fileId) override;
     void deleteAttachment(ConvRef c, Ts ts, int attachmentId, Done d) override;
+    void cancelDownload(const std::string &toPath) override { _t->cancelDownload(toPath); }
     void downloadFile(
         const std::string &url, std::string toPath, Done done, Progress progress = {}
     ) override;

@@ -57,6 +57,7 @@ public:
     void setNotifyLevel(model::ConvRef conv, model::NotifyLevel level) override;
     void leave(model::ConvRef conv) override;
     void openDm(model::UserRef user, std::function<void(model::ConvRef)> done) override;
+    void reopen(model::ConvRef conv) override;
     void joinChannel(model::ConvRef conv, ConvDone done) override;
     // A new, empty channel with me as its only member.
     void createChannel(std::string name, bool isPrivate, ConvDone done) override;

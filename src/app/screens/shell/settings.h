@@ -45,7 +45,7 @@ struct Settings {
 
     // ── Appearance ──────────────────────────────────────────────────────────
     int                      paletteLight = 4, paletteDark = 4; // ui::Palette::Custom (Raspberry Beret)
-    ui::CustomPalette        custom;
+    ui::CustomPalette        custom   = ui::raspberryBeret();
     int                      fontSize = 1; // 0 small, 1 medium, 2 large (App::setUserTextScale)
     std::string              language = "system"; // "system", "en", "ja"
     bool                     use24h = false, threadsInline = false, linkPreviews = true;
@@ -107,6 +107,8 @@ struct Settings {
     std::vector<std::pair<std::string, int64_t>> visitedAt;
     // DMs and apps closed here, by conversation id: when (epoch secs).
     std::vector<std::pair<std::string, int64_t>> closedAt;
+    // DMs and apps opened again after a close: when (epoch secs).
+    std::vector<std::pair<std::string, int64_t>> reopenedAt;
     // The sidebar sections' sorts (SectionSort::encode, plain ones left
     // out), per workspace (auth::WorkspaceRecord::key) and section
     // (Sidebar::sectionKey).

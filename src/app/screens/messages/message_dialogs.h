@@ -49,13 +49,15 @@ showTableViewer(ui::Window &w, Context &ctx, std::vector<std::vector<std::string
 // and <url> links (linkId i opens (*links)[i - 1]). Themed colours.
 text::AttributedText markdownPreviewText(std::string_view md, std::vector<std::string> *links);
 // A Markdown file's text in the viewer: `download` is its Download button
-// (none when empty); links open in the browser.
+// (none when empty); links open in the browser. Images show under their line
+// (http(s), or paths relative to `baseDir`: the file's folder, when local).
 ui::Popup           *showMarkdownViewer(
     ui::Window           &w,
     Context              &ctx,
     std::string           title,
     std::string_view      md,
-    std::function<void()> download
+    std::function<void()> download,
+    std::string_view      baseDir = {}
 );
 // A CSV file read and parsed: disk and CPU work for a worker thread
 // (model::runInBackground); no UI text. No rows when unreadable.

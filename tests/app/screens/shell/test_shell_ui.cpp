@@ -452,6 +452,58 @@ TEST("sidebar: a closed DM or app opened from elsewhere is listed again, and sta
     CHECK(h.sidebar().rowState(bot).exists);
 }
 
+TEST("sidebar: a closed group DM opened from elsewhere is reopened and stays listed") {
+    Harness       h;
+    const ConvRef trio = h.conv("G0TRIO");
+    REQUIRE(trio != kNoConv);
+    REQUIRE(h.sidebar().rowState(trio).exists);
+    REQUIRE(h.sidebar().closeRow(trio));
+    pump();
+    REQUIRE(!h.sidebar().rowState(trio).exists);
+    h.sh->open(trio); // from search
+    pump();
+    CHECK(h.sidebar().rowState(trio).exists);
+    for (int i = 0; i < 100 && !h.store.conversation(trio).member; ++i)
+        app().pump(5);
+    CHECK(h.store.conversation(trio).member); // Backend::reopen
+    h.sh->open(h.conv("C0DESIGN"));
+    pump();
+    CHECK(h.sidebar().rowState(trio).exists);
+}
+
+TEST("sidebar: a reopened DM leads its section across a restart") {
+    Harness              h;
+    std::vector<ConvRef> dms;
+    for (ConvRef c : h.sidebar().order())
+        if (h.store.conversation(c).kind == ConvKind::Dm && !h.store.conversation(c).starred &&
+            c != h.sidebar().selected())
+            dms.push_back(c);
+    REQUIRE(dms.size() >= 2);
+    const auto firstDm = [&] {
+        for (ConvRef c : h.sidebar().order())
+            if (h.store.conversation(c).kind == ConvKind::Dm && !h.store.conversation(c).starred)
+                return c;
+        return kNoConv;
+    };
+    const ConvRef last = dms.back();
+    REQUIRE(firstDm() != last);
+    REQUIRE(h.sidebar().closeRow(last));
+    pump();
+    h.store.updateConversation(last, [](Conversation &c) { c.member = true; });
+    h.sidebar().select(last);
+    pump();
+    REQUIRE(firstDm() == last);
+    const shell::Sidebar::VisitStamps saved = h.sidebar().reopened();
+    CHECK(saved.count(h.store.conversation(last).id));
+    // A restart without the stamps: back to its place; with them: on top.
+    h.sidebar().setReopened({});
+    pump();
+    CHECK(firstDm() != last);
+    h.sidebar().setReopened(saved);
+    pump();
+    CHECK(firstDm() == last);
+}
+
 TEST("sidebar: a DM's status emoji shows the status when hovered") {
     Harness       h;
     const ConvRef dm   = h.conv("D0MIRA");
@@ -1091,14 +1143,49 @@ TEST("downloads: the tray shows progress, then Show in Finder, and goes when dis
     list.finish(id, true);
     pump();
     CHECK(label(" of ") == nullptr);
-    auto *show = static_cast<ui::Button *>(findView(h.win->topPopup(), [](ui::View *v) {
+    ui::View *showLabel = findView(h.win->topPopup(), [](ui::View *v) {
         return v->accessibleName() == "Show in Finder" || v->accessibleName() == "Show in folder";
-    }));
-    REQUIRE(show != nullptr);
-    show->onClick();
+    });
+    REQUIRE(showLabel != nullptr);
+    CHECK(label("Open") != nullptr);
+    static_cast<ui::Clickable *>(showLabel->parent())->onClick(); // the text action
+
     std::string url;
     REQUIRE(app().platform().testHooks()->lastOpenedUrl(&url));
     CHECK(str::startsWith(url, "file://") && url.find("downloads") != std::string::npos);
+    // Another one, paused and resumed (from the start), then cancelled.
+    const std::string src = file::join(dir, "src.bin");
+    REQUIRE(file::writeAtomic(src, std::string(2048, 'x')));
+    const std::string to = file::join(dir, "copy.bin");
+    file::remove(to);
+    const int run = list.begin("copy.bin", to, "Binary", src);
+    list.progress(run, 512, 2048);
+    pump();
+    const auto clickText = [&](std::string_view text) {
+        ui::View *l =
+            findView(h.win->topPopup(), [&](ui::View *v) { return v->accessibleName() == text; });
+        REQUIRE(l != nullptr);
+        static_cast<ui::Clickable *>(l->parent())->onClick();
+        pump();
+    };
+    clickText("Pause");
+    CHECK(list.find(run)->state == model::Downloads::State::Paused);
+    CHECK(label("Paused") != nullptr);
+    CHECK(label("Resume") != nullptr);
+    clickText("Resume"); // fetched again: here a local copy
+    for (int i = 0; i < 200 && list.find(run)->state == model::Downloads::State::Running; ++i)
+        app().pump(5);
+    CHECK(list.find(run)->state == model::Downloads::State::Done);
+    CHECK(file::size(to) == 2048);
+    const int gone = list.begin("gone.bin", file::join(dir, "gone.bin"), "", src);
+    pump();
+    REQUIRE(label("gone.bin") != nullptr);
+    clickText("Cancel");
+    CHECK(list.find(gone) == nullptr);
+    list.remove(run);
+    file::remove(src);
+    file::remove(to);
+    pump();
     // ×: the card goes, and with the last one the tray.
     auto *x = findView(h.win->topPopup(), [](ui::View *v) { return v->tooltip() == "Dismiss"; });
     REQUIRE(x != nullptr);

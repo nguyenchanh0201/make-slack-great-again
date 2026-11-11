@@ -115,6 +115,7 @@ public:
     void moveToSection(model::ConvRef conv, const std::string &id) override;
     void moveSection(const std::string &id, int step) override;
     void openDm(model::UserRef user, std::function<void(model::ConvRef)> done) override;
+    void reopen(model::ConvRef conv) override;
     void joinChannel(model::ConvRef conv, ConvDone done) override;
     void createChannel(std::string name, bool isPrivate, ConvDone done) override;
     void loadChannelDirectory() override;
@@ -122,6 +123,7 @@ public:
     void setSaved(model::ConvRef conv, model::Ts ts, bool saved) override;
     void deleteFile(model::ConvRef conv, model::Ts ts, const std::string &fileId) override;
     void deleteAttachment(model::ConvRef conv, model::Ts ts, int attachmentId, Done done) override;
+    void cancelDownload(const std::string &toPath) override;
     void downloadFile(
         const std::string &url, std::string toPath, Done done, Progress progress = {}
     ) override;
@@ -379,6 +381,8 @@ private:
     std::unique_ptr<net::Client>       _transfers;
     net::Client                       &transfers();
     std::vector<std::shared_ptr<Done>> _downloads; // downloadFile's, until answered
+    // The same by destination, for cancelDownload: the transfer and its done.
+    std::unordered_map<std::string, std::pair<net::RequestId, std::shared_ptr<Done>>> _downloadsTo;
     bool                               _authLost = false;
     // Enterprise Grid (auth.test's enterprise_id), and the thread
     // methods there refused without team_id once: they send it since.

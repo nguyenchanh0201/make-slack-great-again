@@ -335,7 +335,7 @@ constexpr Spec kSpecs[] = {
 constexpr Color kDarkInk = 0xff1d1c1d, kWhite = 0xffffffff;
 
 Palette       g_palette[2] = {Palette::Custom, Palette::Custom};
-CustomPalette g_custom;
+CustomPalette g_custom     = raspberryBeret();
 PaletteColors g_cache[2];
 bool          g_cached[2] = {false, false};
 

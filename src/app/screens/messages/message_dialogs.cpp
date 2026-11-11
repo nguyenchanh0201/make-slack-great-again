@@ -919,10 +919,101 @@ text::AttributedText markdownPreviewText(std::string_view md, std::vector<std::s
 
 namespace {
 
+// A Markdown image line's picture: a placeholder until it is downloaded, then
+// its natural size scaled to fit (≤ kMaxW wide, ≤ kMaxH tall); "Image
+// unavailable" when it can't be fetched. Slack's credentials only ever go to
+// slack.com hosts (slack::downloadAuth), never to an image's own host.
+class MarkdownImage final : public CachedImage {
+public:
+    static constexpr float kMaxW = 640, kMaxH = 480;
+    MarkdownImage(ImageCache &cache, std::string url)
+        : CachedImage(cache, std::move(url), ImageCache::Shape::Rounded, 6), _cache(cache) {
+        style().size(kMaxW, 180).alignSelf(Align::Start).margins(0, 8, 0, 8);
+        setPlaceholder(C::CodeBg);
+        setLoadingText(tr("Loading image\xE2\x80\xA6"), C::TextMuted);
+    }
+    void paint(gfx::Painter &p) override {
+        int w = 0, h = 0;
+        if (!_sized && _cache.naturalSize(path(), &w, &h) && w > 0 && h > 0) {
+            _sized         = true;
+            const float k  = std::max(1.f, windowScale()); // physical px → logical
+            const float lw = float(w) / k, lh = float(h) / k;
+            const float s = std::min({1.f, kMaxW / lw, kMaxH / lh});
+            style().size(std::max(1.f, std::floor(lw * s)), std::max(1.f, std::floor(lh * s)));
+            invalidateLayout();
+        }
+        CachedImage::paint(p);
+    }
+
+protected:
+    void paintPlaceholder(gfx::Painter &p, ui::RectF r, float radius) override {
+        const float k = windowScale();
+        if (!_failed && _cache.failed(
+                            {path(),
+                             int(std::lround(width() * k)),
+                             int(std::lround(height() * k)),
+                             ImageCache::Shape::Rounded,
+                             6 * k}
+                        )) {
+            _failed = true;
+            setLoadingText(tr("Image unavailable"), C::TextMuted);
+        }
+        CachedImage::paintPlaceholder(p, r, radius);
+    }
+
+private:
+    ImageCache &_cache;
+    bool        _sized = false, _failed = false;
+};
+
+// The pictures of one Markdown line, ![alt](src), outside `code` spans, in
+// order: an http(s) URL as is; a relative or absolute path only with
+// `baseDir` (a local file's folder; a downloaded copy has none, so its
+// relative images stay links). *alone: the line has nothing else.
+std::vector<std::string> lineImages(std::string_view line, std::string_view baseDir, bool *alone) {
+    std::vector<std::string> out;
+    std::string              rest; // the line without its images
+    bool                     code = false;
+    for (size_t i = 0; i < line.size();) {
+        if (line[i] == '`') {
+            code = !code;
+            rest += line[i++];
+            continue;
+        }
+        const size_t mid = !code && line.compare(i, 2, "![") == 0 ? line.find("](", i) : line.npos;
+        const size_t end = mid == line.npos ? mid : line.find(')', mid);
+        if (end == line.npos) {
+            rest += line[i++];
+            continue;
+        }
+        std::string_view src = line.substr(mid + 2, end - mid - 2);
+        src                  = str::trim(src.substr(0, src.find(' '))); // a "title" after it
+        std::string path;
+        if (str::startsWith(src, "https://") || str::startsWith(src, "http://"))
+            path = std::string(src);
+        else if (str::startsWith(src, "file://"))
+            path = baseDir.empty() ? std::string() : file::fromFileUrl(src);
+        else if (!baseDir.empty() && !src.empty() && src.find(':') == src.npos)
+            path = file::resolve(baseDir, src.substr(0, src.find_first_of("?#")));
+        if (path.empty()) { // not shown as a picture: stays a link in the text
+            rest.append(line.substr(i, end + 1 - i));
+        } else {
+            out.push_back(std::move(path));
+        }
+        i = end + 1;
+    }
+    *alone = !out.empty() && str::trim(rest).empty();
+    return out;
+}
+
 class MarkdownViewer final : public ui::Popup {
 public:
     MarkdownViewer(
-        Context &ctx, std::string title, std::string_view md, std::function<void()> download
+        Context              &ctx,
+        std::string           title,
+        std::string_view      md,
+        std::string_view      baseDir,
+        std::function<void()> download
     )
         : _ctx(ctx) {
         setCard(false);
@@ -952,17 +1043,53 @@ public:
         auto *scroll = _panel->add<ui::ScrollView>();
         scroll->style().flex(1);
         scroll->content()->style().column().padding(24, 8, 24, 24);
-        auto *body = scroll->content()->add<ui::Label>();
-        body->setRichText(markdownPreviewText(md, &_links));
-        body->onLink = [this](uint32_t id) {
-            // Web and mail links only: a relative one points into the repo.
-            if (id == 0 || id > _links.size() || !_ctx.openUrl)
+        // The text in runs between the images that stand on their own line
+        // (outside code blocks); an image inside a line stays a link.
+        ui::View   *content = scroll->content();
+        std::string run;
+        bool        fence = false;
+        const auto  flush = [&] {
+            if (str::trim(run).empty()) {
+                run.clear();
                 return;
-            const std::string &url = _links[id - 1];
-            if (str::startsWith(url, "http://") || str::startsWith(url, "https://") ||
-                str::startsWith(url, "mailto:"))
-                _ctx.openUrl(url);
+            }
+            // Each label numbers its links from 1: a table per label.
+            auto  links = std::make_shared<std::vector<std::string>>();
+            auto *body  = content->add<ui::Label>();
+            body->setRichText(markdownPreviewText(run, links.get()));
+            body->onLink = [this, links](uint32_t id) {
+                // Web and mail links only: a relative one points into the repo.
+                if (id == 0 || id > links->size() || !_ctx.openUrl)
+                    return;
+                const std::string &url = (*links)[id - 1];
+                if (str::startsWith(url, "http://") || str::startsWith(url, "https://") ||
+                    str::startsWith(url, "mailto:"))
+                    _ctx.openUrl(url);
+            };
+            run.clear();
         };
+        for (size_t at = 0; at <= md.size();) {
+            const size_t           nl   = std::min(md.find('\n', at), md.size());
+            const std::string_view line = md.substr(at, nl - at);
+            at                          = nl + 1;
+            const std::string_view t    = str::trim(line);
+            if (str::startsWith(t, "```") || str::startsWith(t, "~~~"))
+                fence = !fence;
+            bool                     alone = false;
+            std::vector<std::string> pics;
+            if (!fence)
+                pics = lineImages(line, baseDir, &alone);
+            if (!alone) { // its text (an image in it stays a link there)
+                run.append(line);
+                run += '\n';
+            }
+            if (!pics.empty()) { // the pictures under their line
+                flush();
+                for (std::string &src : pics)
+                    content->add<MarkdownImage>(_ctx.images, std::move(src));
+            }
+        }
+        flush();
     }
     void layout() override {
         const float w = std::min(900.f, std::max(200.f, width() - 80));
@@ -984,9 +1111,8 @@ public:
     }
 
 private:
-    Context                 &_ctx;
-    ui::View                *_panel = nullptr;
-    std::vector<std::string> _links;
+    Context  &_ctx;
+    ui::View *_panel = nullptr;
 };
 
 } // namespace
@@ -996,9 +1122,11 @@ ui::Popup *showMarkdownViewer(
     Context              &ctx,
     std::string           title,
     std::string_view      md,
-    std::function<void()> download
+    std::function<void()> download,
+    std::string_view      baseDir
 ) {
-    auto  v   = std::make_unique<MarkdownViewer>(ctx, std::move(title), md, std::move(download));
+    auto v =
+        std::make_unique<MarkdownViewer>(ctx, std::move(title), md, baseDir, std::move(download));
     auto *raw = v.get();
     w.showPopup(std::move(v));
     raw->focus(); // Esc reaches it

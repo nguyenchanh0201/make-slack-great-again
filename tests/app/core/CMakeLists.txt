@@ -18,7 +18,7 @@ target_compile_definitions(msga_app_tests PRIVATE
 # The fake backend's timers run on plat's headless loop; times pin a zone.
 foreach(s ${core_suites})
     target_sources(msga_app_tests PRIVATE test_${s}.cpp)
-    msga_add_test(core_${s} COMMAND msga_app_tests test_${s} TZ LABELS core)
+    msga_add_test(core_${s} COMMAND msga_app_tests test_${s} TZ HOME ${CMAKE_CURRENT_BINARY_DIR}/test-home LABELS core)
 endforeach()
 
 if(UNIX)

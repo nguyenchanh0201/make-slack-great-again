@@ -360,6 +360,13 @@ void FakeBackend::leave(ConvRef conv) {
     setConvFlag(conv, ConvFlag::Member, 0);
 }
 
+void FakeBackend::reopen(ConvRef conv) {
+    later(kReadLatencyMs, [this, conv] {
+        if (conv < _store.conversationCount() && !_store.conversation(conv).member)
+            setConvFlag(conv, ConvFlag::Member, 1);
+    });
+}
+
 void FakeBackend::openDm(model::UserRef user, std::function<void(ConvRef)> done) {
     later(kReadLatencyMs, [this, user, done = std::move(done)] {
         ConvRef found = model::kNoConv;

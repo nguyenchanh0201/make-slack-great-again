@@ -2402,6 +2402,48 @@ TEST(
     CHECK(at("https://y").linkId == 2);
 }
 
+TEST("rich: a Markdown preview shows its images under their lines, relative ones when local") {
+    Env        e(false);
+    // The text blocks of the open viewer, top to bottom.
+    const auto blocks = [&](ui::Popup *v) {
+        std::vector<std::string>        out;
+        std::function<void(ui::View *)> walk = [&](ui::View *n) {
+            if (n->role() == ui::Role::Text && n->accessibleName().size() > 12)
+                out.push_back(n->accessibleName());
+            for (size_t i = 0; i < n->childCount(); ++i)
+                walk(n->child(i));
+        };
+        walk(v);
+        return out;
+    };
+    const std::string md =
+        "before the picture\n\n![a cat](https://files.img.test/cat.png)\n\nafter it, and "
+        "![inline](https://files.img.test/i.png) stays a link\n```\n![in "
+        "code](https://x.test/c.png)\n"
+        "```\nthen a relative one\n\n![mira](avatars/mira.png)\n\nthe end of the file\n";
+    // A downloaded copy (no folder): the relative image stays text.
+    ui::Popup *v = showMarkdownViewer(*e.win, e.ctx, "pic.md", md, {});
+    pump(4);
+    std::vector<std::string> t = blocks(v);
+    // The lone picture and the inline one split the text; code keeps its own.
+    REQUIRE(t.size() == 3);
+    CHECK(t[0].find("before the picture") != std::string::npos);
+    CHECK(t[1].find("inline stays a link") != std::string::npos);
+    CHECK(t[2].find("![in code](https://x.test/c.png)") != std::string::npos);
+    CHECK(t[2].find("mira") != std::string::npos); // not found: a link in the text
+    v->close();
+    pump(2);
+    // A local file: its relative image is found next to it, and splits too.
+    v = showMarkdownViewer(*e.win, e.ctx, "pic.md", md, {}, MSGA_TEST_ASSETS);
+    pump(4);
+    t = blocks(v);
+    REQUIRE(t.size() == 4);
+    CHECK(t[2].find("mira") == std::string::npos);
+    CHECK(t[3].find("the end of the file") != std::string::npos);
+    v->close();
+    pump(2);
+}
+
 TEST("actions: a file card click downloads (Download tooltip), a Markdown one opens its preview") {
     const std::string dir = tempDir("chips");
     {
@@ -4160,6 +4202,8 @@ TEST("audio: a remote clip downloads once into the audio cache as a job; one pla
     REQUIRE(until([&] { return audioState(player) == media::AudioPlayer::State::Error; }));
     CHECK_STR(player.status().error, "Download failed");
     file::remove(cached);
+    if (e.backend.asked.size() >= 2) // the second clip's copy too: the next run downloads again
+        file::remove(e.backend.asked[1].to);
 }
 
 TEST("audio: View transcript shows Slack's line; Transcribe with AI replaces it") {

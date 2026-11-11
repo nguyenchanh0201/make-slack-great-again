@@ -17,6 +17,8 @@ void Backend::setMuted(ConvRef, bool) {}
 void Backend::setNotifyLevel(ConvRef, NotifyLevel) {}
 void Backend::leave(ConvRef) {}
 
+void Backend::reopen(ConvRef) {}
+
 void Backend::openDm(UserRef, std::function<void(ConvRef)> done) {
     if (done)
         done(kNoConv);

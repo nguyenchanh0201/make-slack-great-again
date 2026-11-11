@@ -1151,38 +1151,56 @@ void SlackBackend::downloadFile(
     // transfer and still answers it, so the caller's background job ends.
     auto held = std::make_shared<Done>(std::move(done));
     _downloads.push_back(held);
-    transfers().send(std::move(req), [this, held, toPath = std::move(toPath)](net::Response r) {
-        std::erase(_downloads, held);
-        Done done = std::exchange(*held, nullptr);
-        if (r.error == "cancelled") {
-            if (done)
-                done(false, "cancelled");
-            return;
-        }
-        std::string err = r.error;
-        if (err.empty() && !r.ok())
-            err = str::concat({"http ", str::number(r.status)});
-        if (err.empty() && str::startsWith(r.header("Content-Type"), "text/html") &&
-            r.body.find("<html") != std::string::npos &&
-            r.url.find("files.slack.com") != std::string::npos)
-            err = "not_authed";
-        if (!err.empty()) {
-            LOG_WARN("slack", "download: %s", err.c_str());
-            if (done)
-                done(false, err);
-            return;
-        }
-        auto body = std::make_shared<std::string>(std::move(r.body));
-        auto ok   = std::make_shared<bool>(false);
-        model::runInBackground(
-            _app,
-            [body, ok, toPath] { *ok = file::writeAtomic(toPath, *body); },
-            [ok, done] {
-                if (done) // the file is written either way: no alive check
-                    done(*ok, *ok ? std::string() : std::string("write_failed"));
+    const std::string to = toPath;
+    const auto        rid =
+        transfers().send(std::move(req), [this, held, toPath = std::move(toPath)](net::Response r) {
+            std::erase(_downloads, held);
+            if (const auto it = _downloadsTo.find(toPath);
+                it != _downloadsTo.end() && it->second.second == held)
+                _downloadsTo.erase(it);
+            Done done = std::exchange(*held, nullptr);
+            if (r.error == "cancelled") {
+                if (done)
+                    done(false, "cancelled");
+                return;
             }
-        );
-    });
+            std::string err = r.error;
+            if (err.empty() && !r.ok())
+                err = str::concat({"http ", str::number(r.status)});
+            if (err.empty() && str::startsWith(r.header("Content-Type"), "text/html") &&
+                r.body.find("<html") != std::string::npos &&
+                r.url.find("files.slack.com") != std::string::npos)
+                err = "not_authed";
+            if (!err.empty()) {
+                LOG_WARN("slack", "download: %s", err.c_str());
+                if (done)
+                    done(false, err);
+                return;
+            }
+            auto body = std::make_shared<std::string>(std::move(r.body));
+            auto ok   = std::make_shared<bool>(false);
+            model::runInBackground(
+                _app,
+                [body, ok, toPath] { *ok = file::writeAtomic(toPath, *body); },
+                [ok, done] {
+                    if (done) // the file is written either way: no alive check
+                        done(*ok, *ok ? std::string() : std::string("write_failed"));
+                }
+            );
+        });
+    _downloadsTo[to] = {rid, held};
+}
+
+void SlackBackend::cancelDownload(const std::string &toPath) {
+    const auto it = _downloadsTo.find(toPath);
+    if (it == _downloadsTo.end())
+        return;
+    const auto [rid, held] = it->second;
+    _downloadsTo.erase(it);
+    transfers().cancel(rid); // its done never runs: answered here
+    std::erase(_downloads, held);
+    if (Done done = std::exchange(*held, nullptr))
+        done(false, "cancelled");
 }
 
 void SlackBackend::deleteFile(ConvRef conv, Ts ts, const std::string &fileId) {
@@ -1539,6 +1557,24 @@ void SlackBackend::leave(ConvRef conv) {
             });
         }
     );
+}
+
+// conversations.open by id resumes an IM or MPIM (a group DM too, which
+// openDm's users= can't name without its whole member list).
+void SlackBackend::reopen(ConvRef conv) {
+    if (conv >= _store.conversationCount() || !_store.conversation(conv).isDirect())
+        return;
+    api("conversations.open",
+        net::formEncode({{"channel", convId(conv)}}),
+        [this, conv](const json::Document &, const std::string &err) {
+            if (err == "cancelled")
+                return;
+            if (!err.empty()) {
+                LOG_WARN("slack", "conversations.open (reopen): %s", err.c_str());
+                return;
+            }
+            _store.updateConversation(conv, [](model::Conversation &c) { c.member = true; });
+        });
 }
 
 void SlackBackend::openDm(model::UserRef user, std::function<void(ConvRef)> done) {

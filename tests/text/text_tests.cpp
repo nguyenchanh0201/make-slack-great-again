@@ -445,7 +445,12 @@ void inkLean() {
         st.weight       = Weight::Bold;
         const float px  = 1 / scale;
         const float one = lay("1", 1e9f, scale, st)->inkLean();
+#ifndef __APPLE__
+        // The flag of the bundled/Linux UI font's "1" is light; macOS's
+        // system font draws a "1" whose ink is centred (lean ~0), so only
+        // the per-glyph checks below hold there.
         CHECK(one > px / 2);
+#endif
         CHECK(std::fabs(lay("0", 1e9f, scale, st)->inkLean()) < px / 2);
         CHECK(std::fabs(lay("11", 1e9f, scale, st)->inkLean() - one) < px / 2);
         CHECK(std::fabs(lay("99+", 1e9f, scale, st)->inkLean()) < px);

@@ -46,6 +46,9 @@ void BackendProxy::setNotifyLevel(ConvRef c, NotifyLevel level) {
 void BackendProxy::leave(ConvRef c) {
     _t->leave(c);
 }
+void BackendProxy::reopen(ConvRef c) {
+    _t->reopen(c);
+}
 void BackendProxy::openDm(UserRef u, std::function<void(ConvRef)> done) {
     _t->openDm(u, std::move(done));
 }
