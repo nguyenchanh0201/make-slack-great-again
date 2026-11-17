@@ -65,7 +65,8 @@ Backend interfaces unchanged.
 **Interfaces (all inside `slack::readstate` unless noted):**
 - `enum class Source { ConversationInfo, Roster, Counts, Marked, Reconcile };`
 - `struct Count { std::optional<uint32_t> value; bool exact = true; };`
-- `struct Observation { std::optional<model::Ts> lastRead, latest; Count unread, mentions; Source source; };`
+- `struct CountPair { Count unread, mentions; };`
+- `struct Observation { std::optional<model::Ts> lastRead, latest; CountPair raw, display; std::optional<bool> hasUnreads; Source source; };`
 - `mapjson::conversationReadObservation(const json::Value &o, readstate::Source source) -> readstate::Observation`.
 - `mapjson::countsReadObservation(const json::Value &o, bool direct) -> readstate::Observation`.
 - Add `readstate::Observation read` to `mapjson::Counts`. Keep its existing numeric fields as movement-detection projections, not authoritative presence information.
@@ -78,26 +79,44 @@ Backend interfaces unchanged.
   // Raw and display values are not interchangeable: preserve raw total
   // for conversations.info and the endpoint-specific display semantics elsewhere.
   // input {unread_count:0, latest:300, last_read:200}
-  CHECK(obs.unread.value.has_value());
-  CHECK(*obs.unread.value == 0);
+  CHECK(obs.raw.unread.value.has_value());
+  CHECK(*obs.raw.unread.value == 0);
   CHECK(mappedConversation.unread == 0);
   // input omits both unread_count and any applicable authoritative flag
-  CHECK(!missing.unread.value.has_value());
+  CHECK(!missing.raw.unread.value.has_value());
   // input {unread_count:4}
-  CHECK(positive.unread.value == 4);
+  CHECK(positive.raw.unread.value == 4);
   // negative, overflow beyond UINT32_MAX, string/object/null => unknown, not wraparound
-  CHECK(!malformed.unread.value.has_value());
+  CHECK(!malformed.raw.unread.value.has_value());
   // mentions omitted versus explicitly zero remain distinguishable too
-  CHECK(!absentMention.mentions.value.has_value());
-  CHECK(zeroMention.mentions.value == 0);
+  CHECK(!absentMention.raw.mentions.value.has_value());
+  CHECK(zeroMention.raw.mentions.value == 0);
   ```
 
-  Also pin `client.counts` fixtures: DM `dm_count` is an exact count;
-  `has_unreads=true` without an exact count is an inexact lower bound of one;
-  `has_unreads=false` is zero; absent fields remain unknown. Conflicting fields
-  retain positive evidence and trigger later reconciliation, rather than
-  treating a contradictory zero as proof of read. Characterize existing
-  raw/display fixture differences before choosing their precedence.
+  **Contract gate:** first add an endpoint/field semantics table to the
+  investigation, with evidence provenance. Do not establish real Slack semantics
+  from hand-authored fake responses alone. Keep these domains separate:
+
+  | Endpoint/source | Fields retained | Required characterization |
+  |---|---|---|
+  | `conversations.info` / roster entries | `unread_count`, `mention_count` in raw; applicable `*_display` fields in display | Which counts describe the visible badge, and which cover filtered/thread/own activity? |
+  | `*_marked` | `unread_count_display`, `mention_count_display` in display | Cursor/count scope, omission, and whether a fresh endpoint can confirm the same metric |
+  | `client.counts` IM/MPIM/channel entries | `dm_count`, `mention_count`, `has_unreads` with their source semantics retained | Is `dm_count` exact and equivalent to the badge metric for each conversation kind? |
+
+  For the last row, preserve `dm_count` as source-specific raw data until its
+  domain is established; `has_unreads` is a separate optional flag. A true flag
+  alone is only a lower bound of one, not an exact message count. Do not label
+  `dm_count` exact merely because the current code treats it as a number.
+
+  Add raw/display disagreement fixtures (raw=2, display=0; raw=0, display=2),
+  display-only, raw-only, explicit false versus absent flags, and conflicting
+  flags/counts. Assert both domains survive parsing without substitution.
+  Visible state uses a characterized display-compatible metric. An unavailable
+  display field must not silently fall back to a non-equivalent raw total.
+  If no count-bearing endpoint is known to confirm the same metric, retain safe
+  state and report that limitation; do not declare convergence proven by a fake
+  response. Characterization may use documented contracts or sanitized real
+  captures, with all credentials and message content removed.
 - [ ] **Step 2: Build and run the new group; record the expected failures.**
   Run `cmake --build build --target msga_app_tests -j 6`, then
   `PLAT_BACKEND=headless build/tests/app/msga_app_tests test_slack_read 'dm zero parsing'`.
@@ -107,7 +126,8 @@ Backend interfaces unchanged.
   Preserve existing positive model projections. Use optional observation metadata
   at merge boundaries in subsequent tasks so a missing model projection of zero
   is never treated as an authoritative zero. Do not put presence flags in the
-  persisted Conversation type. Preserve `toCounts` movement detection behavior.
+  persisted Conversation type. Preserve `toCounts` movement detection behavior;
+  its numeric projections are not an authorization to mix raw/display domains.
 - [ ] **Step 4: Run the parsing group and `ctest --test-dir build -R '^core_slack_read$' --output-on-failure`.**
   Expected: new assertions pass. If a legacy assertion relies on fabricated
   counts, replace it with a fixture carrying real count/flag information and
@@ -128,6 +148,9 @@ Backend interfaces unchanged.
 - Private `SlackBackend::recordUnreadArrival(model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions) -> void`.
 - Private `SlackBackend::retireReadEvidence(const std::string &channel, model::Ts through) -> void`.
 - Private `SlackBackend::applyReadObservation(model::ConvRef c, const readstate::Observation &obs, const readstate::DispatchContext &context, bool allowBackwardCursor = false) -> void`.
+- `readstate::ReadDecision { model::Ts lastRead, latest; uint32_t unread, mentions; bool accept, refresh; const char *reason; }`.
+- Private `SlackBackend::prepareReadObservation(model::ConvRef c, const model::Conversation &candidate, const readstate::Observation &obs, const readstate::DispatchContext &context, bool allowBackwardCursor = false) const -> readstate::ReadDecision`; no Store emission or mutation during preparation. `applyReadObservation` wraps this decision for standalone read-state updates.
+- Private `SlackBackend::commitReadDecision(model::ConvRef c, const readstate::ReadDecision &decision, const readstate::DispatchContext &context) -> bool`; revalidate freshness, advance accepted bookkeeping/retire absorbed evidence, and queue any required refresh, without Store emission. Return false when preparation was superseded. Decision reason strings have static lifetime. The caller publishes fields only after a successful commit, or preserves current fields on rejection.
 - Private `SlackBackend::queueReadReconcile(const std::string &channel) -> void`; reuse existing `reconcileConversationReadState` for dispatch.
 - `Read::ObservedDone = std::function<void(const json::Document &, const std::string &, const readstate::DispatchContext &)>`.
 - `Read::callObserved(std::string method, std::string form, ObservedDone done, Lane lane = Lane::Normal, bool quiet = false) -> void`.
@@ -168,6 +191,10 @@ Backend interfaces unchanged.
   A subsequent successful request dispatched after invalidation, with no new
   arrivals during flight, may establish a fresh baseline and release the
   invalidation; failed/overlapped requests cannot do so.
+  After a successful authoritative baseline, discard evidence it safely absorbs
+  even when those messages remain unread. Pruning only by the read cursor would
+  cause a busy unread DM to overflow repeatedly. Test steady-state positive
+  snapshots as well as local-read retirement.
 
   Apply accepted explicit zero to old counts; protect eligible post-dispatch
   arrivals still above the accepted read cursor. Unknown counts preserve the
@@ -181,6 +208,14 @@ Backend interfaces unchanged.
   Rejection of potentially newer overlapping work schedules one refresh unless
   already covered by an accepted later dispatch/current-context refresh.
   Keep failed refresh work queued for a paced retry; do not recurse immediately.
+  Automatic reconciliation uses the existing **Background** lane, quiet mode,
+  existing `kPacedMs` spacing, and **at most one automatic reconciliation in
+  flight per workspace**. Keep one deduplicated waiting entry per conversation;
+  drain fairly through the existing tick/queue machinery. A persistent failure
+  backs off under existing request error policy and cannot block other DMs or
+  promote automated work onto the Normal lane. User mark-write ordering and
+  foreground requests retain their existing priority. Do not create a separate
+  timer per incoming message or retry indefinitely inside one callback.
 - [ ] **Step 4: Add ordering/lifecycle cases to the same test group and make them pass.**
   Force a request to wait behind a 429, act locally while queued, and verify
   context is captured at dispatch. Repeat with a transport retry and a new
@@ -189,6 +224,12 @@ Backend interfaces unchanged.
   overflow at entry 257 does not erase unread state and eventually recovers.
   Destroy the backend during a delayed response and check no callback touches it.
   Use fake-server request counters/pumpUntil, not fixed sleeps as proof of order.
+  Add `exact count decreases`: accepted display-compatible total five becomes
+  two at a newer read cursor even though latest remains ahead of that cursor;
+  do not preserve five with `max`. With one definitely disjoint newer arrival,
+  result is three; with overlap unresolved, do not double-count it, and refresh.
+  Check unread and mention totals independently. A lower-bound-only observation
+  of one cannot shrink a known exact total of five.
 - [ ] **Step 5: Run `core_slack_read` and `core_slack_write`, and commit** as
   `fix: reconcile DM count snapshots with incoming arrivals`.
   Record the known Grid token-routing failure separately if unchanged.
@@ -206,7 +247,7 @@ Backend interfaces unchanged.
 - `Read::ObservedPage = std::function<void(const json::Value &, const readstate::DispatchContext &)>`.
 - `Read::paginateObserved(std::string method, std::string form, std::string key, ObservedPage onPage, std::function<void(const std::string &)> onDone, int maxPages = 0, Lane lane = Lane::Normal, bool quiet = false) -> void`.
 - Private `SlackBackend::mergeConversation(model::Conversation fresh, const readstate::Observation *obs = nullptr, const readstate::DispatchContext *context = nullptr) -> model::ConvRef`.
-- `Read::carryLocal(model::Conversation &fresh, const model::Conversation &old, const readstate::Observation *obs = nullptr, const readstate::DispatchContext *context = nullptr) const -> void`. Metadata-only callers without observation/context preserve existing read fields; they must not reinterpret numeric defaults as server read information. Apply accepted read changes through `applyReadObservation`, then carry the accepted fields into the metadata merge.
+- `Read::carryLocal(model::Conversation &fresh, const model::Conversation &old, const readstate::Observation *obs = nullptr, const readstate::DispatchContext *context = nullptr) const -> readstate::ReadDecision`. Metadata-only callers without observation/context preserve existing read fields and return a preserve decision; they must not reinterpret numeric defaults as server read information. Otherwise use Task 2's non-emitting `prepareReadObservation` against the merged candidate metadata and return its decision. The caller uses `commitReadDecision` immediately before its Store merge; on rejection refresh the candidate's read fields from the current Store. Do not emit a read update before publishing the metadata merge.
 
 - [ ] **Step 1: Add group `dm zero sources` in both read/realtime suites.**
   Repeat zero/missing/own-newer cases through roster reload, enrichment, and
@@ -214,6 +255,10 @@ Backend interfaces unchanged.
   after HTTP completion but before patch application: assert it survives.
   Load two roster pages with different dispatch contexts and assert a later
   page cannot lend its freshness to an older page's read observation.
+  Add synchronous observer tests: one changed conversation emits a single
+  coherent Meta update, including its final membership/mute/count/cursor fields.
+  An observer on the first roster entry marks a later entry unread; publishing
+  that later entry must recheck its current intent and preserve that action.
 - [ ] **Step 2: Build and run each suite's `dm zero sources` group.**
   Expected: paths still using numeric maxima fail at least their missing/zero
   or stale-batch assertions before migration.
@@ -224,6 +269,15 @@ Backend interfaces unchanged.
   Pass observations alongside `carryLocal`/`mergeConversation`; no consumer may
   infer presence from a model zero. Migrate `enrichDmActivity`, `applyActivity`,
   `sweepInfo`, `Live::Patch`/`applyPatches`, and explicit reconciliation.
+  Prepare read and metadata fields without emitting, then publish the coherent
+  conversation once using existing Store APIs. Advance accepted bookkeeping
+  before the emit, and never write an old prepared candidate after a callback.
+  For existing roster entries, prepare/revalidate/commit each entry immediately
+  before its Store merge; do not prepare all entries and publish them later.
+  Batch only newly added entries to preserve cold-start roster efficiency.
+  Reentrant callbacks must not invalidate a held Store reference or overwrite a
+  later conversation's newer action. No new public Store transaction API is
+  needed for this ordering.
   Audit every `toConversation` caller, including `createChannel` and
   `loadChannelCanvas` in `slack_actions.cpp`: metadata-only responses must not
   overwrite existing read fields. In `client.counts` tests use its actual
@@ -253,6 +307,8 @@ serialized/coalesced write queue.
 - [ ] **Step 1: Restore the realtime reproduction under group `dm zero events`.**
   Provide a matching `conversations.info` response with cursor=200, latest=300,
   explicit unread=0 and mention=0. Send the original zero `im_marked` event.
+  Include display zero fields in the fresh response when the characterized
+  contract requires them; raw zero alone cannot stand in for display zero.
   Assert eventual unread=0/mentions=0 with pumpUntil after reconciliation, and
   observe no Append/Arrived emitted by the state change. Do not accept a test
   which simply invokes the merge helper and bypasses the WebSocket path.
@@ -269,11 +325,20 @@ serialized/coalesced write queue.
   mutate counts from those ambiguous events. The fresh response may move the
   cursor backward only after the captured intent/context checks pass. Missing
   event cursor/count data cannot overwrite valid state with fabricated zero.
+  Fresh confirmation must use the same count domain established by Task 1;
+  raw unread=2 is not confirmation that display unread=0 was stale. Exercise
+  raw=2/display=0 through the actual marked-event-to-refetch path, not just a
+  parser unit test. If confirmation lacks a comparable field, preserve safe
+  state and surface that unresolved contract in diagnostics rather than guess.
 - [ ] **Step 4: Test repeated conflicts, failures, and recovery.**
   A burst of 20 conflicting events coalesces to one in-flight reconciliation
   plus at most one necessary queued refresh. Script an initial failure, then
   success; safe counts persist until success and converge afterward. Check
   no immediate request loop and preserve serial mark writes and thread reads.
+  Repeat with 20 distinct DMs: assert automatic reconciliations stay at one
+  in flight per workspace, foreground calls can still dispatch, and every
+  queued DM eventually gets a turn after the failure clears. Verify absorbed
+  arrival evidence does not accumulate again across unchanged positive polls.
 - [ ] **Step 5: Run realtime/write suites and commit** as
   `fix: reconcile ambiguous Slack DM marked events`.
 
@@ -333,3 +398,107 @@ Interfaces blocks. No implementation was started while writing this plan.
 Execution method remains to be chosen. Recommend **Native** execution because
 Tasks 2–4 share private request/state interfaces and should evolve sequentially
 in one context, followed by an independent whole-change review.
+
+## Engineering review amendments
+
+The user approved keeping the full scope, then authorized applying all review
+recommendations. This review concerns the plan, not an implemented fix.
+
+| Finding | Priority / confidence | Evidence in reviewed revision `d869fee` | Applied change |
+|---|---|---|---|
+| A1: count-domain confirmation was unspecified | P1 / 8 of 10 | Plan lines 78–100 preserve raw totals, while lines 254–267 use display events followed by a raw-count fixture | Task 1 contract table, independent raw/display fields, disagreement tests, and Task 4 same-domain confirmation |
+| C1: read publication before metadata merge permits reentrant intermediate state | P1 / 9 of 10 | Plan line 209 said to apply read changes before metadata merge; `Store::updateConversation` emits immediately and `Store::emit` invokes observers synchronously | Non-emitting preparation, freshness-checked bookkeeping commit, one coherent Store publication per existing entry, and cross-entry observer tests |
+| T1: positive count decreases were not pinned | P2 / 9 of 10 | Task 2 tested zero clears and missing counts, not a current exact count declining from five to two while latest remains ahead | Task 2 exact-count/mention decrease, disjoint-arrival, overlap and lower-bound assertions |
+| P1: automated reconciliation had no workspace-wide concurrency bound | P2 / 9 of 10 | Plan reused `reconcileConversationReadState`; current implementation dispatches on Normal and coalesces only per conversation | Background/quiet automatic reconciliation, one in flight per workspace, fair deduplicated waiting work, 20-DM burst and steady-state evidence-pruning tests |
+
+### What already exists
+
+- `Read::send`, paced/held queues, retry policy and `join`: extend these with
+  observation context; do not build a second HTTP scheduler.
+- `_readEpoch`, `_readIntent`, serialized `Write::mark`: retain local Read/Mark
+  unread ordering; the new evidence clock solves a different race.
+- `Read::inject`: reuse its delivery eligibility and duplicate checks.
+- Existing `applyMarkedEvent` and reconciliation queue: extend their conflict
+  rules and pacing, not their public API.
+- `Store::mergeConversation` and synchronous observers: reuse publication APIs
+  with prepare/commit ordering; avoid adding a public transaction API.
+- Existing fake server, C++ tests, headless notification probes and base logger:
+  reuse them for regression evidence and opt-in diagnostics.
+
+### Data flow and failure coverage
+
+```text
+HTTP queue -> dispatch stamp -> response parser -> raw/display observation
+                 | retry recaptures context        |
+WS marked -> missing/ambiguous/conflicting? -> paced confirmation
+                 |                                  |
+                 +-------------------------+--------+
+                                           v
+incoming delivery -> eligible/deduplicated evidence -> prepare decision
+local Read/Mark unread -> newer intent guards ------> | (no Store emit)
+                                           v
+                    freshness recheck -> reject/defer -> coalesced refresh
+                                           |
+                                         accept
+                                           v
+                      commit bookkeeping -> one coherent Store publication
+                                           v
+                          sidebar/workspace badge; no message replay
+```
+
+Add a short inline version of the prepare/commit/publish invariant near the
+implementation in `slack_backend.cpp` and the actual-dispatch context capture.
+
+| Production failure | Handling required by the plan | Owning regression / user effect |
+|---|---|---|
+| Raw/display semantics differ or count absent | No cross-domain substitution; obtain comparable evidence or report limitation | Task 1 + Task 4 disagreement tests; transient conservative badge possible |
+| Reply/message arrives during a delayed response | Protect eligible post-dispatch evidence, preserve local intent | Task 2 races; new unread remains visible |
+| Observer changes another entry while roster publishes | Per-entry fresh preparation and guarded commit | Task 3 cross-entry reentrancy; no stale overwrite |
+| Retry, joined request, reverse completion or stale patch | Actual-attempt immutable context and a coalesced fresh follow-up | Tasks 2–3 queue/order tests; eventual convergence |
+| Conflicting event, rejected mark, failed confirmation | Retain safe state, existing write barriers and paced retry | Task 4 intent/failure tests; no false success or banner replay |
+| Evidence overflow or long-lived unread backlog | Invalidate unsafe evidence; absorb/prune successful baselines | Task 2 overflow + Task 4 steady-state tests; bounded memory |
+| Many DMs reconcile at once | Background/quiet, one in flight per workspace, fair draining | Task 4 multi-DM burst; foreground work keeps priority |
+| Backend destroyed during response | Existing lifetime cancellation retained throughout adapters | Task 2 teardown; no stale callback access |
+
+No unhandled silent failure was identified in the revised plan; actual protocol
+semantics remain an explicit implementation characterization gate, not a claim
+that the live bug is solved.
+
+### NOT in scope
+
+- A replacement read-state service, generic HTTP scheduler, or public Store
+  transaction API: existing mechanisms suffice with the added invariants.
+- Repairing the unrelated Grid token-routing baseline failure: report it,
+  but do not broaden this fix to authentication.
+- New badge styling, changes to mute/thread policy, distribution or release:
+  this work corrects the existing synchronization behavior.
+
+### Implementation Tasks from this review
+
+- [ ] **R1 (P1)** — Task 1/4: characterize count domains and test disagreement end to end; verify parsing and event test groups.
+- [ ] **R2 (P1)** — Task 2/3: prepare without emission, commit current bookkeeping, publish once; verify synchronous and cross-entry observer tests.
+- [ ] **R3 (P2)** — Task 2: pin five-to-two exact-count decreases and overlapping newer arrivals; verify polling tests.
+- [ ] **R4 (P2)** — Task 2/4: cap workspace reconciliation and retire absorbed evidence; verify 20-DM fairness and steady-state tests.
+
+All four actions are integrated into the main tasks above; these checkboxes are
+review traceability, not additional implementation workstreams. No new deferred
+TODO is needed. Sequential implementation, no parallelization opportunity.
+
+## GSTACK REVIEW REPORT
+
+| Review | Runs | Status | Findings |
+|---|---:|---|---|
+| Engineering plan review | 1 | CLEAR for implementation planning | 4 findings applied: architecture 1, code quality 1, tests 1, performance 1 |
+| Independent outside voice | 0 | Skipped | No independent second review performed in this pass |
+
+Scope retained as approved. Data-flow/failure coverage recorded above. Four test
+coverage additions are assigned to their owning tasks. No implementation or
+runtime tests were performed in this documentation review; the earlier baseline
+and its unrelated Grid failure remain as recorded in the investigation.
+
+**VERDICT:** ENG PLAN REVIEW CLEAR — implement in task order, with Task 1's
+count-semantics characterization gate satisfied before cross-domain behavior
+is changed. This does not certify production correctness or resolve the
+uncaptured live incident.
+
+NO UNRESOLVED DECISIONS
