@@ -1870,4 +1870,79 @@ TEST("dm scope live: captured main/thread read survives info=1, reconnect, and r
     CHECK(e.store.conversation(d1).unread == 1);
 }
 
+TEST("dm scope threads: thread replies and floors stay independent of main DM unread") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    const Ts root     = model::parseTs("1794909869.919749");
+    const Ts mainRead = model::parseTs("1794909941.811299");
+    const Ts reply    = model::parseTs("1794910537.557059");
+
+    // Seed root message and mainRead < reply.
+    model::Message mRoot;
+    mRoot.ts   = root;
+    mRoot.user = e.store.findUser("UMIRA");
+    mRoot.text = "root message";
+    e.store.addMessage(d1, std::move(mRoot));
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = mainRead;
+        c.latest   = root;
+        c.unread   = 0;
+        c.mentions = 0;
+    });
+
+    // 1. Thread read floor established via conversations.replies (root.last_read == reply).
+    script("conversations.replies", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1794909869.919749","user":"UMIRA","text":"root message",
+         "reply_count":1,"latest_reply":"1794910537.557059","last_read":"1794910537.557059"},
+        {"type":"message","ts":"1794910537.557059","thread_ts":"1794909869.919749",
+         "parent_user_id":"UMIRA","user":"UMIRA","text":"already read reply"}]}])");
+    e.be->loadThread(d1, root, [](bool, const std::string &) {});
+    REQUIRE(pumpUntil([&] { return e.be->threadReadFloor(d1, root) == reply; }));
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    CHECK(e.store.unreadThreads() == 0);
+
+    // 2. Late RTM delivery of the already-read reply must NOT increment main DM unread or unreadThreads.
+    REQUIRE(push(envelope(
+        "late-read-reply",
+        R"({"type":"message","channel":"D1","user":"UMIRA","ts":"1794910537.557059",
+            "thread_ts":"1794909869.919749","parent_user_id":"UMIRA","text":"already read reply"})"
+    )));
+    fakeslack::pumpFor(80);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    CHECK(e.store.unreadThreads() == 0);
+
+    // 3. A reply after the accepted floor in a followed thread is independently unread in Threads,
+    // without incrementing main DM unread.
+    REQUIRE(push(envelope(
+        "new-thread-reply",
+        R"({"type":"message","channel":"D1","user":"UMIRA","ts":"1794910539.000000",
+            "thread_ts":"1794909869.919749","parent_user_id":"UME","text":"new reply"})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.unreadThreads() > 0; }));
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 4. thread_broadcast counts once on the main DM and is not retired by threadRead.
+    const Ts bcast = model::parseTs("1794910540.000000");
+    REQUIRE(push(envelope(
+        "bcast-reply",
+        R"({"type":"message","channel":"D1","subtype":"thread_broadcast","user":"UMIRA",
+            "ts":"1794910540.000000","thread_ts":"1794909869.919749","text":"broadcast"})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).latest == bcast; }));
+    CHECK(e.store.conversation(d1).unread == 1);
+    e.be->markThreadRead(d1, root, bcast);
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 1);
+    CHECK(e.store.unreadThreads() == 0);
+}
+
 #endif

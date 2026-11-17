@@ -377,6 +377,7 @@ private:
         model::Ts        threadRoot = 0
     );
     void retireReadEvidence(const std::string &channel, model::Ts through);
+    void retireThreadReadEvidence(model::ConvRef c, model::Ts root, model::Ts through);
     void applyReadObservation(
         model::ConvRef                    c,
         const readstate::Observation     &obs,

@@ -2475,7 +2475,8 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
     struct Acc {
         std::vector<model::Message> replies;
         model::Message              rootMsg;
-        bool                        haveRoot = false;
+        bool                        haveRoot     = false;
+        Ts                          rootLastRead = 0;
         std::vector<char>           parentIsMe; // per reply
     };
     auto acc = std::make_shared<Acc>();
@@ -2489,8 +2490,9 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
             for (const json::Value v : arr) {
                 model::Message m = mapjson::toMessage(v, s);
                 if (m.ts == root) {
-                    acc->rootMsg  = std::move(m);
-                    acc->haveRoot = true;
+                    acc->rootMsg      = std::move(m);
+                    acc->haveRoot     = true;
+                    acc->rootLastRead = std::max(acc->rootLastRead, model::parseTs(v["last_read"].str()));
                 } else if (m.ts) {
                     m.threadTs = root;
                     if (const model::Message *old = s.findMessage(c, m.ts))
@@ -2512,6 +2514,8 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
                     done(false, "channel_not_found");
                 return;
             }
+            if (acc->rootLastRead > 0)
+                threadRead(c, root, acc->rootLastRead);
             // The root stays in the channel list: refresh its thread fields.
             if (acc->haveRoot)
                 s.updateMessage(c, root, [&](model::Message &r) {
@@ -3152,6 +3156,10 @@ bool SlackBackend::Read::feedThread(
     // The Threads entry: the feed's own
     // read cursor or mine, whichever is further; the first page
     // after a start restores it.
+    if (lastRead > 0) {
+        threadReadFloor[key] = std::max(threadReadFloor[key], lastRead);
+        b.retireThreadReadEvidence(c, root, threadReadFloor[key]);
+    }
     const Ts floor = std::max(lastRead, threadReadFloor[key]);
     if (newest > floor && !s.threadMuted(c, root))
         unreadThreads[key] = newest;
@@ -3295,6 +3303,7 @@ void SlackBackend::Read::threadRead(ConvRef c, Ts root, Ts upTo) {
     f                     = std::max(f, upTo);
     Ts &base              = threadBaseline[key];
     base                  = std::max(base, upTo);
+    b.retireThreadReadEvidence(c, root, upTo);
     if (const auto it = unreadThreads.find(key); it != unreadThreads.end() && it->second <= upTo)
         unreadThreads.erase(it);
     publishUnreadThreads();
@@ -3772,12 +3781,13 @@ bool SlackBackend::Read::inject(ConvRef c, model::Message m, bool parentIsMe) {
     const bool                 isDm = cv.isDirect(), muted = cv.muted;
     const bool                 threadMuted = root && s.threadMuted(c, root);
     const bool                 isFollowed  = !threadMuted && root && (parentIsMe || followed.count(key));
+    const bool                 isThreadReply = root > 0 && root != ts;
+    const bool                 isBroadcast   = isThreadReply && m.subtype() == "thread_broadcast";
+    const bool                 isOrdinaryThreadReply = isThreadReply && !isBroadcast;
 
     uint32_t du = 0, dm = 0;
-    if (counted) {
-        if (root && !mention && !isFollowed && (threadMuted || !isDm)) {
-            // lives in the thread, not the channel
-        } else if (!muted) {
+    if (counted && !isOrdinaryThreadReply) {
+        if (!muted) {
             du = 1;
             dm = isDm || mention || isFollowed;
         } else if (!isDm && (mention || isFollowed)) {
@@ -3785,7 +3795,12 @@ bool SlackBackend::Read::inject(ConvRef c, model::Message m, bool parentIsMe) {
         }
     }
     if (du > 0 || dm > 0)
-        b.recordUnreadArrival(c, ts, du, dm);
+        b.recordUnreadArrival(
+            c, ts, du, dm, readstate::Scope::MainConversation, isBroadcast ? root : 0
+        );
+    else if (isOrdinaryThreadReply && !own && cv.member && !threadMuted &&
+             (parentIsMe || followed.count(key) || mention) && ts > threadReadFloor[key])
+        b.recordUnreadArrival(c, ts, 1, mention ? 1 : 0, readstate::Scope::Thread, root);
 
     if (root && !s.replies(c, root)) {
         // The thread isn't loaded: count the reply on its root only (the
@@ -3797,8 +3812,9 @@ bool SlackBackend::Read::inject(ConvRef c, model::Message m, bool parentIsMe) {
                 std::find(r.replyUsers.begin(), r.replyUsers.end(), author) == r.replyUsers.end())
                 r.replyUsers.push_back(author);
         });
-        // Still news: what notifies.
-        s.announceReply(c, m);
+        // Still news: what notifies (unless already covered by thread floor).
+        if (!isOrdinaryThreadReply || ts > threadReadFloor[key])
+            s.announceReply(c, m);
     } else {
         s.addMessage(c, std::move(m));
         // The open, focused chat marks it read as it
@@ -4005,7 +4021,32 @@ void SlackBackend::retireReadEvidence(const std::string &channel, Ts through) {
         std::remove_if(
             arrivals.begin(),
             arrivals.end(),
-            [through](const readstate::Arrival &a) { return a.ts <= through; }
+            [through](const readstate::Arrival &a) {
+                return a.scope == readstate::Scope::MainConversation && a.ts <= through;
+            }
+        ),
+        arrivals.end()
+    );
+}
+
+void SlackBackend::retireThreadReadEvidence(ConvRef c, Ts root, Ts through) {
+    if (c >= _store.conversationCount() || !root || through <= 0)
+        return;
+    const std::string &channel = _store.conversation(c).id;
+    if (channel.empty())
+        return;
+    const auto it = _readIntent.find(channel);
+    if (it == _readIntent.end())
+        return;
+    auto &arrivals = it->second.arrivals;
+    arrivals.erase(
+        std::remove_if(
+            arrivals.begin(),
+            arrivals.end(),
+            [root, through](const readstate::Arrival &a) {
+                return a.scope == readstate::Scope::Thread && a.threadRoot == root &&
+                       a.ts <= through;
+            }
         ),
         arrivals.end()
     );
