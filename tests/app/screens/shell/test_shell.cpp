@@ -4294,3 +4294,194 @@ TEST("title bar: controls take their presses, empty space drags the window") {
     CHECK(at(centre(h.sh->searchBar())) == H::Client); // the search bar fills the strip
 #endif
 }
+
+TEST("notifications: a delayed already-read DM stays silent") {
+    TwoWorkspaces w;
+    Store        &a   = w.a;
+    const ConvRef dm  = a.findConversation("D0MIRA");
+    const ConvRef gen = a.findConversation("C0GENERAL");
+    const Ts      t   = a.conversation(dm).latest + 1000;
+    a.markRead(dm, t);
+    const uint64_t before = lastNotification(nullptr);
+
+    // 1. Absent top-level message at T (already covered by lastRead) stays silent.
+    Message atT;
+    atT.ts   = t;
+    atT.user = a.findUser("U0MIRA");
+    atT.text = "delayed already-read";
+    a.addMessage(dm, std::move(atT));
+    pump();
+    CHECK(lastNotification(nullptr) == before);
+    CHECK(a.conversation(dm).unread == 0);
+    CHECK(a.conversation(dm).mentions == 0);
+
+    // 2. A message at T+1 still notifies under the same settings.
+    Message atT1;
+    atT1.ts   = t + 1;
+    atT1.user = a.findUser("U0MIRA");
+    atT1.text = "genuinely unread";
+    a.addMessage(dm, std::move(atT1));
+    plat::TestHooks::NotificationProbe n;
+    REQUIRE(until([&] { return lastNotification(&n) > before; }));
+    CHECK_STR(n.body, "genuinely unread");
+
+    // 3. Read while a sender is unresolved, switch to another conversation,
+    // then finish name resolution: no banner.
+    const uint64_t beforeResolve = lastNotification(nullptr);
+    User           temp;
+    temp.id          = "U0UNRES";
+    temp.placeholder = true;
+    const UserRef ur = a.addUser(std::move(temp));
+    Message       unres;
+    unres.ts   = t + 100;
+    unres.user = ur;
+    unres.text = "who am i";
+    a.addMessage(dm, std::move(unres));
+    pump();
+    a.markRead(dm, t + 100);
+    w.sh->open(gen);
+    User resolved;
+    resolved.id          = "U0UNRES";
+    resolved.name        = "unres";
+    resolved.displayName = "Unres User";
+    resolved.placeholder = false;
+    a.addUser(std::move(resolved));
+    for (int i = 0; i < 40; ++i)
+        app().pump(10);
+    CHECK(lastNotification(nullptr) == beforeResolve);
+
+    // 4. Read while an avatar is pending, switch away, then finish decoding:
+    // no banner.
+    auto        &avatar = a.user(a.findUser("U0MIRA")).avatar;
+    const size_t slash  = avatar.rfind('/');
+    REQUIRE(slash != std::string::npos);
+    avatar.insert(slash + 1, "./"); // uncached key -> async decode
+    const uint64_t beforeAvatar = app().platform().testHooks()->maxNotificationId();
+    Message        pendingAv;
+    pendingAv.ts   = t + 200;
+    pendingAv.user = a.findUser("U0MIRA");
+    pendingAv.text = "read before decode";
+    a.addMessage(dm, std::move(pendingAv));
+    REQUIRE(app().platform().testHooks()->maxNotificationId() == beforeAvatar);
+    a.markRead(dm, t + 200);
+    w.sh->open(a.findConversation("C0DESIGN"));
+    CHECK(lastNotification(nullptr) == beforeAvatar);
+}
+
+TEST("notifications: workspace switch permits unread banner; detach during avatar wait cancels safely") {
+    TwoWorkspaces w;
+    Store        &a     = w.a;
+    auto         &avatar = a.user(a.findUser("U0MIRA")).avatar;
+    const size_t  slash  = avatar.rfind('/');
+    REQUIRE(slash != std::string::npos);
+
+    // Switching workspaces alone still permits a genuinely unread banner.
+    avatar.insert(slash + 1, "./");
+    const uint64_t beforeSwitch = app().platform().testHooks()->maxNotificationId();
+    w.post(a, "D0MIRA", "unread across switch");
+    REQUIRE(app().platform().testHooks()->maxNotificationId() == beforeSwitch);
+    w.show(kKeyB);
+    plat::TestHooks::NotificationProbe n;
+    REQUIRE(until([&] { return lastNotification(&n) > beforeSwitch; }));
+    CHECK_STR(n.body, "unread across switch");
+
+    // Detaching the originating workspace during the avatar wait cancels safely.
+    w.show(kKeyA);
+    w.sh->open(a.findConversation("C0DESIGN"));
+    avatar.insert(slash + 1, "./");
+    const uint64_t beforeDetach = app().platform().testHooks()->maxNotificationId();
+    w.post(a, "D0MIRA", "dropped workspace");
+    REQUIRE(app().platform().testHooks()->maxNotificationId() == beforeDetach);
+    w.sh->detachWorkspace(kKeyA);
+    w.show(kKeyB);
+    CHECK(lastNotification(nullptr) == beforeDetach);
+}
+
+TEST("notifications: main DM cursor does not suppress thread replies; known thread floor does") {
+    TwoWorkspaces w;
+    Store        &a    = w.a;
+    const ConvRef dm   = a.findConversation("D0MIRA");
+    const Ts      root = a.conversation(dm).latest;
+    w.fa.followedRoot  = root;
+    a.updateConversation(dm, [&](Conversation &c) { c.lastRead = root + 10000; });
+
+    // Reply below main DM lastRead, with no known thread floor, still notifies.
+    const uint64_t before = lastNotification(nullptr);
+    Message        r1;
+    r1.ts       = root + 5000;
+    r1.threadTs = root;
+    r1.user     = a.findUser("U0MIRA");
+    r1.text     = "unread reply";
+    a.announceReply(dm, r1);
+    plat::TestHooks::NotificationProbe n;
+    REQUIRE(until([&] { return lastNotification(&n) > before; }));
+    CHECK_STR(n.body, "unread reply");
+
+    // A reply covered by a known thread floor stays silent.
+    w.fa.markThreadRead(dm, root, root + 6000);
+    const uint64_t beforeFloor = lastNotification(nullptr);
+    Message        r2;
+    r2.ts       = root + 5500;
+    r2.threadTs = root;
+    r2.user     = a.findUser("U0MIRA");
+    r2.text     = "already read reply";
+    a.announceReply(dm, r2);
+    pump();
+    CHECK(lastNotification(nullptr) == beforeFloor);
+}
+
+TEST("emoji: picking from popup does not click through to views behind; deleting shortcode removes whole token") {
+    Harness h;
+    // 1. A popup closing on PointerDown must swallow PointerUp so a view behind
+    // it (e.g. an image attachment) does not receive the release click.
+    struct BehindView final : ui::View {
+        int ups = 0;
+        ui::SizeF measureContent(float, float) override { return {400, 400}; }
+        bool onEvent(ui::Event &e) override {
+            if (e.type == ui::EventType::PointerUp) {
+                ++ups;
+                return true;
+            }
+            return e.type == ui::EventType::PointerDown;
+        }
+    };
+    struct CloseOnPressPopup final : ui::Popup {
+        bool picked = false;
+        ui::SizeF measureContent(float, float) override { return {200, 200}; }
+        bool onEvent(ui::Event &e) override {
+            if (e.type == ui::EventType::PointerDown) {
+                picked = true;
+                close();
+                return true;
+            }
+            return Popup::onEvent(e);
+        }
+    };
+    auto *behind = h.win->root().add<BehindView>();
+    auto  popup  = std::make_unique<CloseOnPressPopup>();
+    auto *pRaw   = static_cast<CloseOnPressPopup *>(h.win->showPopup(std::move(popup)));
+    pRaw->setAnchor({100, 100, 10, 10}, ui::Popup::Place::Below);
+    pump();
+    const ui::PointF hit{pRaw->bounds().x + 20, pRaw->bounds().y + 20};
+    auto             ptr = [&](plat::EventType type) {
+        plat::Event e;
+        e.type   = type;
+        e.pos    = {hit.x, hit.y};
+        e.button = plat::Button::Left;
+        return e;
+    };
+    h.win->handle(ptr(plat::EventType::PointerDown));
+    h.win->handle(ptr(plat::EventType::PointerUp));
+    CHECK(behind->ups == 0);
+    h.win->root().remove(behind);
+
+    // 2. Deleting into :face_with_peeking_eye: removes the whole shortcode.
+    auto &edit = h.sh->composer().edit();
+    edit.insertText("hi :face_with_peeking_eye:");
+    edit.focus();
+    plat::Event bs;
+    bs.type = plat::EventType::KeyDown;
+    bs.key  = plat::Key::Backspace;
+    h.win->handle(bs);
+    CHECK_STR(edit.text(), "hi ");
+}

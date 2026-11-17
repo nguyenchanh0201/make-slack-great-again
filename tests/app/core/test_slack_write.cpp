@@ -1078,4 +1078,33 @@ TEST("slack: on Grid the org's methods go with the org token and the workspace's
     CHECK(offGrid["form"]["team_id"].str().empty());
 }
 
+TEST("slack write: retry/failure of earlier mark preserves write order and newest local intent") {
+    if (!haveServer())
+        return;
+    Env      e;
+    const Ts tsA = e.old;
+    const Ts tsB = e.old + 100;
+    model::Message m;
+    m.ts   = tsB;
+    m.user = e.mira;
+    std::vector<model::Message> page;
+    page.push_back(std::move(m));
+    e.store.addPage(e.general, std::move(page));
+
+    // First mark fails transiently (503) and retries, while a newer markUnread is queued.
+    script(
+        "conversations.mark",
+        R"([{"__status": 503, "__raw": "Service Unavailable"}, {"ok": true}, {"ok": true}])"
+    );
+    e.be->markRead(e.general, tsA);
+    e.be->markUnread(e.general, tsB);
+    CHECK(e.store.conversation(e.general).lastRead == tsB - 1);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.mark") == 3; }, 5000));
+    const Log log;
+    CHECK(log.get("conversations.mark", 0)["form"]["ts"].str() == model::formatTs(tsA));
+    CHECK(log.get("conversations.mark", 1)["form"]["ts"].str() == model::formatTs(tsA));
+    CHECK(log.get("conversations.mark", 2)["form"]["ts"].str() == model::formatTs(tsB - 1));
+    CHECK(e.store.conversation(e.general).lastRead == tsB - 1);
+}
+
 #endif // !_WIN32

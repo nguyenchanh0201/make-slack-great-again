@@ -137,7 +137,13 @@ uint64_t Shell::post(const plat::Notification &n) {
     return pa.notify(id, n) ? id : 0;
 }
 
-void Shell::postNotification(plat::Notification n, std::vector<std::string> pics, Notified where) {
+void Shell::postNotification(
+    plat::Notification       n,
+    std::vector<std::string> pics,
+    Notified                 where,
+    bool                     recheckMessage,
+    bool                     mention
+) {
     n.timeoutMs    = kNotifyTimeoutMs;
 #ifdef __APPLE__
     n.threadId = str::concat({where.key, "\x1F", where.convId});
@@ -151,7 +157,18 @@ void Shell::postNotification(plat::Notification n, std::vector<std::string> pics
     where.postedAt = base::nowSecs();
     notificationImage(
         std::move(pics),
-        [this, n = std::move(n), where = std::move(where)](plat::Image img) mutable {
+        [this, n = std::move(n), where = std::move(where), recheckMessage, mention](
+            plat::Image img
+        ) mutable {
+            if (recheckMessage) {
+                model::Store *st = storeFor(where.key);
+                if (!st)
+                    return;
+                const ConvRef conv = st->findConversation(where.convId);
+                if (conv == kNoConv ||
+                    !messageNotifyEligible(*st, conv, where.root, where.ts, mention))
+                    return;
+            }
             n.image = std::move(img);
 #ifdef __APPLE__
             // Read the current choice after any avatar delay; the OS plays it only once.
@@ -197,6 +214,40 @@ void Shell::messagesArrived(model::Store &st, const std::string &key, const mode
         maybeNotify(st, key, ch.conv, (*list)[i], true);
 }
 
+bool Shell::messageNotifyEligible(
+    const model::Store &st, ConvRef conv, Ts root, Ts ts, bool mention
+) {
+    if (conv >= st.conversationCount() || ts <= 0)
+        return false;
+    model::Backend &be = backendFor(st);
+    if (model::tsSecs(ts) < be.nowSecs() - kMaxNotifyAgeSecs)
+        return false; // too old: a backfill, not news
+    if (!_settings.notifications || st.workspaceMuted)
+        return false;
+    // On screen: this workspace, this conversation, the window focused.
+    if (&st == &_ctx.store() && _signedIn && reading() && conv == _current)
+        return false;
+    const model::Conversation &c = st.conversation(conv);
+    if (!c.member || effectiveLevel(c) == model::NotifyLevel::Nothing)
+        return false;
+    if (root && st.threadMuted(conv, root) && !mention)
+        return false;
+    const bool followed  = root && be.threadFollowed(conv, root);
+    const bool important = c.isDirect() || mention || followed;
+    if (effectiveLevel(c) != model::NotifyLevel::All && !important)
+        return false;
+    // Top-level messages use the conversation cursor; thread replies use only a
+    // known thread read floor (an absent floor does not mean read).
+    if (!root) {
+        if (c.lastRead && ts <= c.lastRead)
+            return false;
+    } else {
+        if (const Ts floor = be.threadReadFloor(conv, root); floor > 0 && ts <= floor)
+            return false;
+    }
+    return true;
+}
+
 // The gates, in order, then the notification.
 void Shell::maybeNotify(
     model::Store &st, const std::string &key, ConvRef conv, const model::Message &m, bool allowDefer
@@ -204,30 +255,17 @@ void Shell::maybeNotify(
     model::Backend &be = backendFor(st);
     if (conv >= st.conversationCount())
         return;
-    if (model::tsSecs(m.ts) < be.nowSecs() - kMaxNotifyAgeSecs)
-        return; // too old: a backfill, not news
-    if (!_settings.notifications || st.workspaceMuted)
-        return;
     if ((st.me != kNoUser && m.user == st.me) || m.pending)
         return;
     // Huddles notify on their own; an agent's mid-task updates (tool calls,
     // interim remarks) are shown but never announced.
     if (m.isHuddle() || m.subtype() == "progress")
         return;
-    // On screen: this workspace, this conversation, the window focused.
-    if (&st == &_ctx.store() && _signedIn && reading() && conv == _current)
-        return;
-    const model::Conversation &c = st.conversation(conv);
-    if (!c.member || effectiveLevel(c) == model::NotifyLevel::Nothing)
-        return;
     const Ts   root    = m.isReply() ? m.threadTs : 0;
     const bool mention = st.mentionsMe(m.text);
-    if (root && st.threadMuted(conv, root) && !mention)
+    if (!messageNotifyEligible(st, conv, root, m.ts, mention))
         return;
-    const bool followed  = root && be.threadFollowed(conv, root);
-    const bool important = c.isDirect() || mention || followed;
-    if (effectiveLevel(c) != model::NotifyLevel::All && !important)
-        return;
+    const model::Conversation &c = st.conversation(conv);
 
     // The author and raw mentions resolved
     // first (at most ~1.5 s), so the text names people.
@@ -276,7 +314,7 @@ void Shell::maybeNotify(
         pics = {screens::authorAvatar(st, m), m.extra ? m.extra->botAvatar : std::string()};
     else
         pics = {workspaceIconFor(st)};
-    postNotification(std::move(n), std::move(pics), {key, c.id, root, m.ts, {}});
+    postNotification(std::move(n), std::move(pics), {key, c.id, root, m.ts, {}}, true, mention);
 }
 
 void Shell::notifyWhenUsersResolve(
@@ -294,7 +332,8 @@ void Shell::notifyWhenUsersResolve(
         [this, id, st, key, conv, m = std::move(m), pending = std::move(pending), tries]() mutable {
             std::erase(_resolveTimers, *id);
             // The workspace went away meanwhile: nothing to say.
-            if (!storeAlive(st) || conv >= st->conversationCount())
+            model::Store *resolved = storeFor(key);
+            if (!resolved || resolved != st || !storeAlive(st) || conv >= st->conversationCount())
                 return;
             std::erase_if(pending, [st](model::UserRef u) {
                 return u >= st->userCount() || !st->user(u).placeholder;

@@ -372,9 +372,18 @@ private:
     model::NotifyLevel effectiveLevel(const model::Conversation &c) const;
 
     struct Notified;
+    bool messageNotifyEligible(
+        const model::Store &st, model::ConvRef conv, model::Ts root, model::Ts ts, bool mention
+    );
     // `n` with the first of `pics` there is, timed out and silent (the
     // chosen sound is played here), its click opening `where`.
-    void postNotification(plat::Notification n, std::vector<std::string> pics, Notified where);
+    void postNotification(
+        plat::Notification       n,
+        std::vector<std::string> pics,
+        Notified                 where,
+        bool                     recheckMessage = false,
+        bool                     mention        = false
+    );
 
     struct Running; // an attached workspace
     Running   *findRunning(const std::string &key);

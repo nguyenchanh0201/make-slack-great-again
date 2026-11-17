@@ -1426,4 +1426,75 @@ TEST("slack read: mappers — blocks, rich text, message_changed, conversations"
     }
 }
 
+TEST("slack read: stale snapshots do not restore unread over newer read or erase newer messages") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+    const Ts ts100 = model::parseTs("1800000000.000100");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+
+    // 1. In-flight client.counts reports lastRead=100, latest=300, unread=2 while
+    // local markRead(300) occurs before its response arrives: final cursor 300,
+    // unread/mentions zero.
+    script("client.counts", R"([{"__delay":0.15,"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100",
+                "unread_count":2,"mention_count":2}],"mpims":[]}])");
+    e.respeed("1");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    e.be->markRead(d1, ts300);
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).lastRead == ts300);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 2. Genuine unread backlog outside loaded history retains its count.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.latest   = model::parseTs("1800000000.000500");
+        c.lastRead = ts300;
+        c.unread   = 5;
+        c.mentions = 5;
+    });
+    model::Message one;
+    one.ts   = model::parseTs("1800000000.000500");
+    one.user = e.store.findUser("UMIRA");
+    one.text = "only newest loaded";
+    std::vector<model::Message> page;
+    page.push_back(std::move(one));
+    e.store.addPage(d1, std::move(page));
+    CHECK(e.store.conversation(d1).unread == 5);
+    CHECK(e.store.conversation(d1).mentions == 5);
+
+    // 3. Stale snapshot cannot undo local Mark unread.
+    script("client.counts", R"([{"__delay":0.15,"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1800000000.000500","last_read":"1800000000.000500",
+                "unread_count":0,"mention_count":0}],"mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 3; }));
+    e.be->markUnread(d1, ts300);
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).lastRead == ts300 - 1);
+
+    // 4. Snapshot reports zero through T; unread message T+1 arrives while in flight:
+    // T+1 remains unread.
+    const Ts ts600 = model::parseTs("1800000000.000600");
+    script("client.counts", R"([{"__delay":0.15,"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1800000000.000500","last_read":"1800000000.000500",
+                "unread_count":0,"mention_count":0}],"mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 4; }));
+    model::Message newer;
+    newer.ts   = ts600;
+    newer.user = e.store.findUser("UMIRA");
+    newer.text = "after snapshot";
+    e.store.addMessage(d1, std::move(newer));
+    CHECK(e.store.conversation(d1).unread >= 1);
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).unread >= 1);
+    (void)ts100;
+}
+
 #endif // !_WIN32

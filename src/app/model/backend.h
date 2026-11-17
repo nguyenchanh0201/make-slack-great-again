@@ -775,6 +775,11 @@ public:
         (void)conv, (void)root;
         return false;
     }
+    // Known read floor for a thread (0 when unknown).
+    virtual Ts threadReadFloor(ConvRef conv, Ts root) const {
+        (void)conv, (void)root;
+        return 0;
+    }
     // A user known only by id (a placeholder): looked up;
     // the Store fills the record in when it answers.
     virtual void resolveUser(UserRef u) { (void)u; }

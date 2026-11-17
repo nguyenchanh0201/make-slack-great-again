@@ -68,8 +68,9 @@ public:
     void search(std::string query, std::function<void(std::vector<SearchHit>)> done) override;
     // The demo feed: the threads I started or replied in, the last three
     // replies each, one page; every fixture thread starts out read.
-    void loadThreadsView(std::string cursor, ThreadsViewDone done) override;
-    void markThreadRead(model::ConvRef conv, model::Ts root, model::Ts ts) override;
+    void      loadThreadsView(std::string cursor, ThreadsViewDone done) override;
+    void      markThreadRead(model::ConvRef conv, model::Ts root, model::Ts ts) override;
+    model::Ts threadReadFloor(model::ConvRef conv, model::Ts root) const override;
     // The demo's activity: mentions of me, the newest message of each
     // direct message, replies in my threads, reactions to my messages —
     // unread past the read cursors; one page.

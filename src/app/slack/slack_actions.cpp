@@ -279,21 +279,23 @@ struct SlackBackend::Write {
     // waiting cursor is kept and sent once it answers.
     struct Mark {
         std::string channel, waiting; // waiting: the next ts to send ("" none)
-        bool        inFlight = false;
+        uint64_t    waitingGen = 0;
+        bool        inFlight   = false;
     };
     std::vector<Mark> marks;
 
-    void mark(const std::string &channel, std::string ts) {
+    void mark(const std::string &channel, std::string ts, uint64_t gen) {
         Mark *m = nullptr;
         for (auto &x : marks)
             if (x.channel == channel)
                 m = &x;
         if (!m) {
-            marks.push_back({channel, {}, false});
+            marks.push_back({channel, {}, 0, false});
             m = &marks.back();
         }
         if (m->inFlight) {
-            m->waiting = std::move(ts);
+            m->waiting    = std::move(ts);
+            m->waitingGen = gen;
             return;
         }
         m->inFlight = true;
@@ -301,7 +303,7 @@ struct SlackBackend::Write {
         b.writeCall(
             "conversations.mark",
             net::formEncode({{"channel", channel}, {"ts", ts}}),
-            [this, channel](const json::Document &, const std::string &err) {
+            [this, channel, gen](const json::Document &, const std::string &err) {
                 if (!err.empty() && err != "cancelled")
                     LOG_WARN("slack", "conversations.mark: %s", err.c_str());
                 for (size_t i = 0; i < marks.size(); ++i) {
@@ -309,9 +311,12 @@ struct SlackBackend::Write {
                         continue;
                     marks[i].inFlight = false;
                     std::string next  = std::move(marks[i].waiting);
+                    uint64_t    nGen  = marks[i].waitingGen;
                     marks.erase(marks.begin() + i);
                     if (!next.empty())
-                        mark(channel, std::move(next));
+                        mark(channel, std::move(next), nGen);
+                    else
+                        b.onMarkQueueDrained(channel, gen, err.empty());
                     return;
                 }
             }
@@ -1447,7 +1452,9 @@ void SlackBackend::markRead(ConvRef conv, Ts ts) {
         return;
     }
     _store.markRead(conv, ts);
-    _write->mark(convId(conv), model::formatTs(ts));
+    const std::string id  = convId(conv);
+    const uint64_t    gen = noteLocalMark(id, ts);
+    _write->mark(id, model::formatTs(ts), gen);
 }
 
 void SlackBackend::markThreadRead(ConvRef conv, Ts root, Ts ts) {
@@ -1486,7 +1493,9 @@ void SlackBackend::markUnread(ConvRef conv, Ts ts) {
     if (conv >= _store.conversationCount() || ts <= 0)
         return;
     _store.markUnread(conv, ts);
-    _write->mark(convId(conv), model::formatTs(ts - 1));
+    const std::string id  = convId(conv);
+    const uint64_t    gen = noteLocalMark(id, ts - 1);
+    _write->mark(id, model::formatTs(ts - 1), gen);
 }
 
 // ── Conversations ───────────────────────────────────────────────────────────

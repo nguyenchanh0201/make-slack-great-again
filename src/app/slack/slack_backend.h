@@ -87,7 +87,8 @@ public:
     void setActivityRead(const ActivityItem &item, bool read) override;
     void loadMessage(model::ConvRef conv, model::Ts ts, MessageDone done) override;
     void resolveChannel(const std::string &id) override;
-    bool threadFollowed(model::ConvRef conv, model::Ts root) const override;
+    bool      threadFollowed(model::ConvRef conv, model::Ts root) const override;
+    model::Ts threadReadFloor(model::ConvRef conv, model::Ts root) const override;
     void resolveUser(model::UserRef u) override;
     void requestPresence(model::UserRef u) override;
 
@@ -241,6 +242,7 @@ public:
     void readCallForTest(std::string method, std::string form, ApiDone done, bool background) {
         readCall(std::move(method), std::move(form), std::move(done), background);
     }
+    void pollUnreadCountsForTest();
 
     // ── Shared by both halves ───────────────────────────────────────────────
     // A Web API call with this workspace's auth; tracked so the destructor
@@ -322,6 +324,36 @@ private:
     // on the paced lane (null: it failed; channel_not_found marks it dead).
     std::vector<std::string> directConversationIds() const;
     void sweepInfo(const std::string &id, std::function<void(model::Conversation *info)> done);
+    // Per-conversation local read/unread intent & generation reconciliation.
+    uint64_t noteLocalMark(const std::string &channel, model::Ts desired);
+    void     onMarkQueueDrained(const std::string &channel, uint64_t gen, bool ok);
+    void     applyMarkedEvent(
+        const std::string &channel, model::Ts ts, uint32_t unread, uint32_t mentions
+    );
+    void     reconcileConversationReadState(const std::string &channel);
+    void     applyAuthoritativeReadObservation(
+        model::ConvRef c,
+        model::Ts      lastRead,
+        model::Ts      latest,
+        uint32_t       unread,
+        uint32_t       mentions,
+        bool           allowBackwardCursor
+    );
+    bool     snapshotAllowed(const std::string &channel, uint64_t dispatchEpoch) const;
+    uint64_t readDispatchEpoch() const;
+    void     reconcileCounts(
+        const model::Conversation &cur,
+        model::Ts                  obsLastRead,
+        model::Ts                  obsLatest,
+        uint32_t                   obsUnread,
+        uint32_t                   obsMentions,
+        bool                       seedCounts,
+        bool                       fromCounts,
+        model::Ts                 &outLastRead,
+        model::Ts                 &outLatest,
+        uint32_t                  &outUnread,
+        uint32_t                  &outMentions
+    ) const;
     // A read call with rate limits,
     // lost connections and transient errors waited out; background: the
     // paced 1.2 s lane, which holds while a Normal call is outstanding.
@@ -391,6 +423,18 @@ private:
     // where that is refused.
     bool                               _messagesListUnavailable = false;
     void                               fillActivity(ActivityFeed page, ActivityDone done);
+    struct ReadIntent {
+        uint64_t  gen               = 0;
+        uint64_t  epoch             = 0;
+        model::Ts desired           = 0;
+        bool      pending           = false;
+        bool      awaitingEcho      = false;
+        bool      reconcileInFlight = false;
+        bool      reconcileQueued   = false;
+    };
+    std::unordered_map<std::string, ReadIntent> _readIntent;
+    uint64_t                                    _readEpoch = 0;
+
     std::shared_ptr<bool>              _alive;
     Read                              *_read  = nullptr;
     Write                             *_write = nullptr;

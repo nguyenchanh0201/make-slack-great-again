@@ -622,7 +622,7 @@ private:
     // never send FocusIn; FocusOut corrects it.
     bool                               _active = true, _frameRequested = false, _inFrame = false;
     bool                               _dying = false, _textInput = false, _buttonHeld = false;
-    bool                               _focusVisible = false, _frameAgain = false;
+    bool                               _focusVisible = false, _frameAgain = false, _swallowUp = false;
     bool                               _hoverDirty = false, _pointerInside = false;
     gfx::PaintScratch                  _paintScratch; // the frame painters' working memory
 #ifdef MSGA_UI_VERIFY

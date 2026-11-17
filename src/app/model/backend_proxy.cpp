@@ -374,6 +374,9 @@ void BackendProxy::deleteCanvas(const std::string &fileId, Done d) {
 bool BackendProxy::threadFollowed(ConvRef c, Ts root) const {
     return _t->threadFollowed(c, root);
 }
+Ts BackendProxy::threadReadFloor(ConvRef c, Ts root) const {
+    return _t->threadReadFloor(c, root);
+}
 void BackendProxy::resolveUser(UserRef u) {
     _t->resolveUser(u);
 }

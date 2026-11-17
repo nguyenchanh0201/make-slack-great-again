@@ -114,6 +114,13 @@ void FakeBackend::markThreadRead(ConvRef conv, Ts root, Ts ts) {
     cursor     = std::max(cursor, ts);
 }
 
+Ts FakeBackend::threadReadFloor(ConvRef conv, Ts root) const {
+    for (const ThreadRead &r : _threadRead)
+        if (r.conv == conv && r.root == root)
+            return r.read;
+    return 0;
+}
+
 void FakeBackend::loadThread(ConvRef conv, Ts root, Done done) {
     later(kReadLatencyMs * 2 + slowMs(), [this, conv, root, done = std::move(done)] {
         const bool ok = _store.findMessage(conv, root) != nullptr;

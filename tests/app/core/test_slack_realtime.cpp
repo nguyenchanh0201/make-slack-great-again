@@ -1351,4 +1351,133 @@ TEST("slack realtime: a conversation found dead is never looked up again, across
     cache::WorkspaceCache::remove(app(), "slack:T1");
 }
 
+TEST("slack realtime: marked events preserve newest local read and mark-unread intent") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef        d1  = e.conv("D1");
+    const model::UserRef mr  = e.store.findUser("UMIRA");
+    const Ts      tsA = model::parseTs("1800000000.000100");
+    const Ts      tsB = model::parseTs("1800000000.000200");
+    const Ts      tsC = model::parseTs("1800000000.000300");
+    auto          add = [&](ConvRef c, Ts ts, const char *txt) {
+        model::Message m;
+        m.ts   = ts;
+        m.user = mr;
+        m.text = txt;
+        e.store.addMessage(c, std::move(m));
+    };
+    add(d1, tsA, "one");
+    add(d1, tsB, "two");
+
+    // 1. Read A, Read B, then an older marked event for A: keep B and zero counts.
+    script("conversations.mark", R"([{"ok":true,"__delay":0.15},{"ok":true}])");
+    e.be->markRead(d1, tsA);
+    e.be->markRead(d1, tsB);
+    REQUIRE(push(envelope(
+        "m1",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000100","unread_count_display":1,"mention_count_display":1})"
+    )));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).lastRead == tsB);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    REQUIRE(pumpUntil([&] { return count("conversations.mark") == 2; }));
+
+    // 2. Read C, Mark unread A, then the earlier read echo for C: keep A-1 and unread badge.
+    add(d1, tsC, "three");
+    script("conversations.mark", R"([{"ok":true,"__delay":0.15},{"ok":true}])");
+    e.be->markRead(d1, tsC);
+    e.be->markUnread(d1, tsA);
+    REQUIRE(push(envelope(
+        "m2",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000300","unread_count_display":0,"mention_count_display":0})"
+    )));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).lastRead == tsA - 1);
+    CHECK(e.store.conversation(d1).unread == 3);
+    REQUIRE(pumpUntil([&] { return count("conversations.mark") == 4; }));
+    // Even after HTTP mark queue drains, a delayed echo for C must not undo A-1.
+    script(
+        "conversations.info",
+        R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA","unread_count":3,"unread_count_display":3,"last_read":"1800000000.000099","latest":{"ts":"1800000000.000300"}}}])"
+    );
+    REQUIRE(push(envelope(
+        "m2b",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000300","unread_count_display":0,"mention_count_display":0})"
+    )));
+    fakeslack::pumpFor(100);
+    CHECK(e.store.conversation(d1).lastRead == tsA - 1);
+    CHECK(e.store.conversation(d1).unread == 3);
+
+    // 3. Mark unread A, Read C, then the earlier unread echo: keep C with no stale badge.
+    script("conversations.mark", R"([{"ok":true,"__delay":0.15},{"ok":true}])");
+    e.be->markUnread(d1, tsA);
+    e.be->markRead(d1, tsC);
+    REQUIRE(push(envelope(
+        "m3",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000099","unread_count_display":3,"mention_count_display":3})"
+    )));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).lastRead == tsC);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    REQUIRE(pumpUntil([&] { return count("conversations.mark") == 6; }));
+
+    // Confirm C echo so no local intent is pending.
+    REQUIRE(push(envelope(
+        "m3b",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000300","unread_count_display":0,"mention_count_display":0})"
+    )));
+    fakeslack::pumpFor(50);
+
+    // 4. No local pending intent: legitimate remote Mark unread lowers cursor
+    // without replaying Append/Arrived banners; remote read clears badge.
+    int appends = 0;
+    const auto obs = e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Append || ch.kind == model::ChangeKind::Arrived)
+            ++appends;
+    });
+    script(
+        "conversations.info",
+        R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA","unread_count":3,"unread_count_display":3,"last_read":"1800000000.000099","latest":{"ts":"1800000000.000300"}}}])"
+    );
+    REQUIRE(push(envelope(
+        "m4",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000099","unread_count_display":3,"mention_count_display":3})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == tsA - 1; }));
+    CHECK(e.store.conversation(d1).unread == 3);
+    CHECK(appends == 0);
+    e.store.unobserve(obs);
+
+    REQUIRE(push(envelope(
+        "m5",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000300","unread_count_display":0,"mention_count_display":0})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == tsC; }));
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 5. Group DM isolation: pending intent on D1 does not block mpim_marked on G9.
+    REQUIRE(push(envelope(
+        "m6",
+        R"({"type":"message","channel":"G9","user":"UMIRA","text":"hi group","ts":"1800000000.000400"})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.conv("G9") != kNoConv; }));
+    const ConvRef g9 = e.conv("G9");
+    script("conversations.mark", R"([{"ok":true,"__delay":0.15}])");
+    e.be->markUnread(d1, tsA);
+    REQUIRE(push(envelope(
+        "m7",
+        R"({"type":"mpim_marked","channel":"G9","ts":"1800000000.000400","unread_count_display":0,"mention_count_display":0})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(g9).lastRead == model::parseTs("1800000000.000400"); }));
+    CHECK(e.store.conversation(g9).unread == 0);
+    CHECK(e.store.conversation(d1).lastRead == tsA - 1);
+    REQUIRE(pumpUntil([&] { return count("conversations.mark") == 7; }));
+}
+
 #endif

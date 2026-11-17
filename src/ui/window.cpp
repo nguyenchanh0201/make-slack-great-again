@@ -521,6 +521,7 @@ void Window::pointerMove(PointF pos, const plat::Event &pe) {
 void Window::pointerDown(const plat::Event &pe) {
     _pointer    = {float(pe.pos.x), float(pe.pos.y)};
     _buttonHeld = true;
+    _swallowUp  = false;
     for (View *v : std::vector<View *>(_ticking))
         v->interruptAnimation();
     hideTooltip();
@@ -534,8 +535,10 @@ void Window::pointerDown(const plat::Event &pe) {
         closePopup(top);
         closed = true;
     }
-    if (closed || !t)
+    if (closed || !t) {
+        _swallowUp = closed;
         return;
+    }
     for (View *v = t; v; v = v->_parent)
         if (v->flag(View::FocusOnClick) && v->enabled()) {
             setFocus(v);
@@ -554,11 +557,17 @@ void Window::pointerDown(const plat::Event &pe) {
         _pressPos       = _pointer;
         _longPressTimer = app()->addTimer(kLongPressMs, false, [this] { longPress(); });
     }
-    if (dispatch(t, e))
+    if (dispatch(t, e)) {
         // Not a view the handler just detached (a popup closing itself on
-        // the press, like a dialog's backdrop): it is in the graveyard.
-        _capture = _handled && _handled->window() == this ? _handled : nullptr;
-    else if (pe.button == plat::Button::Right) {
+        // the press, like a dialog's backdrop or the emoji picker): it is in
+        // the graveyard, and the release must not click through behind it.
+        if (_handled && _handled->window() == this) {
+            _capture = _handled;
+        } else {
+            _capture   = nullptr;
+            _swallowUp = true;
+        }
+    } else if (pe.button == plat::Button::Right) {
         Event cm{EventType::ContextMenu};
         cm.windowPos = _pointer;
         cm.mods      = pe.mods;
@@ -603,12 +612,15 @@ void Window::pointerUp(const plat::Event &pe) {
     e.button    = pe.button;
     e.mods      = pe.mods;
     e.raw       = &pe;
+    const bool swallow = _swallowUp;
+    _swallowUp         = false;
     if (View *c = _capture) {
         _capture = nullptr;
         e.pos    = c->mapFromWindow(_pointer);
         c->onEvent(e);
-    } else if (View *t = hitAt(_pointer)) {
-        dispatch(t, e);
+    } else if (!swallow) {
+        if (View *t = hitAt(_pointer))
+            dispatch(t, e);
     }
     updateHover(hitAt(_pointer));
     refreshCursor();

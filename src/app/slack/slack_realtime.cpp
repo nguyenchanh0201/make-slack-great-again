@@ -108,11 +108,16 @@ struct SlackBackend::Live {
     void onContended();
 
     // ── resyncUnreads ───────────────────────────────────────────────────────
-    int                                                      resyncInFlight = 0;
-    std::vector<std::pair<std::string, model::Conversation>> patches;
-    plat::TimerId                                            patchTimer = 0;
-    void                                                     resyncUnreads();
-    void                                                     applyPatches();
+    struct Patch {
+        std::string         id;
+        model::Conversation info;
+        uint64_t            dispatchEpoch = 0;
+    };
+    int                resyncInFlight = 0;
+    std::vector<Patch> patches;
+    plat::TimerId      patchTimer = 0;
+    void               resyncUnreads();
+    void               applyPatches();
 
     // ── The presence link ───────────────────────────────────────────────────
     std::unique_ptr<RtmPresence> rtm;
@@ -287,17 +292,12 @@ void SlackBackend::Live::apply(const json::Value &ev, bool ours) {
     }
     if (type == "channel_marked" || type == "group_marked" || type == "im_marked" ||
         type == "mpim_marked") {
-        const ConvRef c = s.findConversation(ev["channel"].str());
-        if (c == kNoConv)
-            return;
-        const Ts       ts       = model::parseTs(ev["ts"].str());
-        const uint32_t unread   = uint32_t(ev["unread_count_display"].integer());
-        const uint32_t mentions = uint32_t(ev["mention_count_display"].integer());
-        s.updateConversation(c, [&](model::Conversation &x) {
-            x.lastRead = ts;
-            x.unread   = unread;
-            x.mentions = mentions;
-        });
+        b.applyMarkedEvent(
+            std::string(ev["channel"].str()),
+            model::parseTs(ev["ts"].str()),
+            uint32_t(ev["unread_count_display"].integer()),
+            uint32_t(ev["mention_count_display"].integer())
+        );
         return;
     }
     if (type == "presence_change" || type == "dnd_updated_user") {
@@ -632,7 +632,7 @@ void SlackBackend::Live::resyncUnreads() {
             if (!info)
                 return;
             // Batched: one Store update per burst of answers.
-            patches.emplace_back(id, std::move(*info));
+            patches.push_back({id, std::move(*info), b.readDispatchEpoch()});
             if (!patchTimer)
                 patchTimer = b._app.addTimer(kUnreadPatchMs, false, [this] {
                     patchTimer = 0;
@@ -642,20 +642,34 @@ void SlackBackend::Live::resyncUnreads() {
 }
 
 void SlackBackend::Live::applyPatches() {
-    for (const auto &[id, info] : patches) {
-        const ConvRef r = s.findConversation(id);
-        if (r == kNoConv)
+    for (const Patch &p : patches) {
+        const ConvRef r = s.findConversation(p.id);
+        if (r == kNoConv || !b.snapshotAllowed(p.id, p.dispatchEpoch))
             continue;
-        const model::Conversation &c = s.conversation(r);
-        // For a DM every unread is a red-badge mention.
-        if (info.lastRead <= c.lastRead && info.latest <= c.latest && info.unread <= c.unread &&
-            info.unread <= c.mentions)
+        const model::Conversation &c           = s.conversation(r);
+        Ts                         newLastRead = 0, newLatest = 0;
+        uint32_t                   newUnread = 0, newMentions = 0;
+        b.reconcileCounts(
+            c,
+            p.info.lastRead,
+            p.info.latest,
+            p.info.unread,
+            p.info.unread,
+            false,
+            false,
+            newLastRead,
+            newLatest,
+            newUnread,
+            newMentions
+        );
+        if (newLastRead == c.lastRead && newLatest == c.latest && newUnread == c.unread &&
+            newMentions == c.mentions)
             continue;
-        s.updateConversation(r, [&info](model::Conversation &x) {
-            x.lastRead = std::max(x.lastRead, info.lastRead);
-            x.latest   = std::max(x.latest, info.latest);
-            x.unread   = std::max(x.unread, info.unread);
-            x.mentions = std::max(x.mentions, info.unread);
+        s.updateConversation(r, [&](model::Conversation &x) {
+            x.lastRead = newLastRead;
+            x.latest   = newLatest;
+            x.unread   = newUnread;
+            x.mentions = newMentions;
         });
     }
     patches.clear();

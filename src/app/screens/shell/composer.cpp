@@ -802,8 +802,8 @@ bool Composer::keyDown(const Event &e) {
     // A suggested reply is taken with → or Tab from the empty editor.
     if ((e.key == plat::Key::Right || e.key == plat::Key::Tab) && !mods && acceptSuggestion())
         return true;
-    // Pills are atomic: deleting into one removes the whole of it (a partly
-    // edited pill would lose its token).
+    // Pills and :emoji: shortcodes are atomic: deleting into one removes the
+    // whole of it (a partly edited token would lose its emoji/mention).
     if ((e.key == plat::Key::Backspace || e.key == plat::Key::Delete) && !mods) {
         const uint32_t a  = std::min(_edit->anchor(), _edit->caret());
         const uint32_t b  = std::max(_edit->anchor(), _edit->caret());
@@ -818,6 +818,61 @@ bool Composer::keyDown(const Event &e) {
             _edit->setSelection(from, to);
             _edit->insertText("");
             return true;
+        }
+        if (a == b && !(e.key == plat::Key::Backspace && a == 0)) {
+            const std::string &t    = _edit->text();
+            auto               code = [](char ch) {
+                return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+                       ch == '-' || ch == '+';
+            };
+            if (at < t.size()) {
+                size_t l = at, r = at + 1;
+                if (t[at] == ':') {
+                    if (at > 0 && (code(t[at - 1]) || t[at - 1] == ':'))
+                        l = at - 1;
+                    else
+                        r = at + 1;
+                }
+                while (l > 0 && t[l] != ':' && (code(t[l]) || t[l] == ':'))
+                    --l;
+                if (l > 0 && t[l] == ':' && t[l - 1] == ':') {
+                    // Skin-tone suffix "::skin-tone-N": keep walking to the opening ":".
+                    --l;
+                    while (l > 0 && code(t[l - 1]))
+                        --l;
+                    if (l > 0 && t[l - 1] == ':')
+                        --l;
+                }
+                while (r <= t.size() && t[r - 1] != ':' && r < t.size() &&
+                       (code(t[r]) || t[r] == ':'))
+                    ++r;
+                if (r <= t.size() && t[r - 1] == ':' && r < t.size() && t[r] == ':') {
+                    // Crossed into "::skin-tone-N:" from the left.
+                    ++r;
+                    while (r < t.size() && (code(t[r]) || t[r] == '-'))
+                        ++r;
+                    if (r < t.size() && t[r] == ':')
+                        ++r;
+                }
+                if (l < r && r - l >= 3 && t[l] == ':' && t[r - 1] == ':') {
+                    const std::string_view inner(t.data() + l + 1, r - l - 2);
+                    const size_t           tone = inner.find("::");
+                    const std::string_view base =
+                        tone == std::string_view::npos ? inner : inner.substr(0, tone);
+                    bool valid = !base.empty();
+                    for (char ch : base)
+                        valid &= code(ch);
+                    if (valid &&
+                        (tone == std::string_view::npos ||
+                         str::startsWith(inner.substr(tone), "::skin-tone-")) &&
+                        (!emoji::toUnicode(base).empty() ||
+                         _ctx.store().customEmoji().contains(std::string(base)))) {
+                        _edit->setSelection(uint32_t(l), uint32_t(r));
+                        _edit->insertText("");
+                        return true;
+                    }
+                }
+            }
         }
     }
     if (matches(Id::SendMessage, e)) {
