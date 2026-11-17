@@ -245,6 +245,7 @@ public:
         readCall(std::move(method), std::move(form), std::move(done), background);
     }
     void pollUnreadCountsForTest();
+    void reloadConversationsForTest() { reloadConversations(); }
     readstate::DispatchContext captureReadDispatchForTest() { return captureReadDispatch(); }
     void recordUnreadArrivalForTest(
         model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions
@@ -329,7 +330,11 @@ private:
     void                 followThread(model::ConvRef c, model::Ts root);
     // Merges a conversation the server just described (channel_created,
     // conversations.info) keeping what only this client knows.
-    model::ConvRef       mergeConversation(model::Conversation fresh);
+    model::ConvRef       mergeConversation(
+        model::Conversation               fresh,
+        const readstate::Observation     *obs     = nullptr,
+        const readstate::DispatchContext *context = nullptr
+    );
     void                 reloadConversations();
     void                 backfillOpen(); // the open chat's head page, now
     void                 reloadUsergroups();
@@ -346,7 +351,10 @@ private:
     // slack_backend.cpp): which conversations, and one conversations.info
     // on the paced lane (null: it failed; channel_not_found marks it dead).
     std::vector<std::string> directConversationIds() const;
-    void sweepInfo(const std::string &id, std::function<void(model::Conversation *info)> done);
+    void sweepInfo(
+        const std::string                                                  &id,
+        std::function<void(const readstate::ConversationObservation *info)> done
+    );
     // Per-conversation local read/unread intent & generation reconciliation.
     readstate::DispatchContext captureReadDispatch();
     void recordUnreadArrival(model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions);
@@ -387,19 +395,6 @@ private:
     );
     bool     snapshotAllowed(const std::string &channel, uint64_t dispatchEpoch) const;
     uint64_t readDispatchEpoch() const;
-    void     reconcileCounts(
-        const model::Conversation &cur,
-        model::Ts                  obsLastRead,
-        model::Ts                  obsLatest,
-        uint32_t                   obsUnread,
-        uint32_t                   obsMentions,
-        bool                       seedCounts,
-        bool                       fromCounts,
-        model::Ts                 &outLastRead,
-        model::Ts                 &outLatest,
-        uint32_t                  &outUnread,
-        uint32_t                  &outMentions
-    ) const;
     // A read call with rate limits,
     // lost connections and transient errors waited out; background: the
     // paced 1.2 s lane, which holds while a Normal call is outstanding.

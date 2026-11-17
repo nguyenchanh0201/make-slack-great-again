@@ -1480,4 +1480,69 @@ TEST("slack realtime: marked events preserve newest local read and mark-unread i
     REQUIRE(pumpUntil([&] { return count("conversations.mark") == 7; }));
 }
 
+TEST("dm zero sources: reconnect patch clears own-newer zero, preserves missing, and respects post-HTTP markUnread") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    REQUIRE(push(envelope(
+        "seed-g9",
+        R"({"type":"message","channel":"G9","user":"UMIRA","text":"hi group","ts":"1800000000.000100"})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.conv("G9") != kNoConv; }));
+    const ConvRef d1 = e.conv("D1");
+    const ConvRef d2 = e.conv("G9");
+    REQUIRE(d1 != kNoConv);
+    REQUIRE(d2 != kNoConv);
+
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+
+    // Seed D1 with stale unread=1 at 199 and own newer at 300; D2 with backlog=4.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    e.store.updateConversation(d2, [&](model::Conversation &c) {
+        c.lastRead = ts200;
+        c.latest   = ts300;
+        c.unread   = 4;
+        c.mentions = 1;
+    });
+    model::Message mD2;
+    mD2.ts   = ts300;
+    mD2.user = e.store.findUser("UEXT");
+    mD2.text = "d2 msg";
+    e.store.addMessage(d2, std::move(mD2));
+
+    // Reconnect resyncUnreads fetches conversations.info:
+    // D1 gets explicit zero at last_read=200, latest=300.
+    // D2 gets missing counts (must preserve unread=4), and we also test local markUnread after HTTP
+    // completes but before the batched patch timer applies it.
+    set(R"({
+        "conversations.info?channel=D1":{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+            "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+            "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}},
+        "conversations.info?channel=G9":{"ok":true,"channel":{"id":"G9","is_mpim":true,"name":"mpdm-me--mira-1",
+            "last_read":"1800000000.000300","latest":{"ts":"1800000000.000300"},
+            "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}
+    })");
+
+    const int infoBefore = count("conversations.info");
+    // Drop and reconnect socket to trigger resyncUnreads.
+    REQUIRE(push(R"({"type":"disconnect","reason":"refresh_requested"})"));
+    REQUIRE(pumpUntil([&] { return count("conversations.info") >= infoBefore + 2; }, 5000));
+    // Immediately mark D2 unread after HTTP completed, before the batched patch timer fires!
+    e.be->markUnread(d2, ts300);
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == ts200; }, 3000));
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    CHECK(e.store.conversation(d2).lastRead == ts300 - 1);
+    CHECK(e.store.conversation(d2).unread >= 1);
+}
+
 #endif

@@ -109,9 +109,9 @@ struct SlackBackend::Live {
 
     // ── resyncUnreads ───────────────────────────────────────────────────────
     struct Patch {
-        std::string         id;
-        model::Conversation info;
-        uint64_t            dispatchEpoch = 0;
+        std::string                id;
+        readstate::Observation     read;
+        readstate::DispatchContext context;
     };
     int                resyncInFlight = 0;
     std::vector<Patch> patches;
@@ -626,13 +626,13 @@ void SlackBackend::Live::resyncUnreads() {
     resyncInFlight = int(ids.size());
     LOG_INFO("slack", "resyncUnreads: recovering unread for %zu DMs/MPDMs", ids.size());
     for (const std::string &id : ids)
-        b.sweepInfo(id, [this, id](model::Conversation *info) {
+        b.sweepInfo(id, [this, id](const readstate::ConversationObservation *obs) {
             if (resyncInFlight > 0)
                 --resyncInFlight;
-            if (!info)
+            if (!obs)
                 return;
             // Batched: one Store update per burst of answers.
-            patches.push_back({id, std::move(*info), b.readDispatchEpoch()});
+            patches.push_back({id, obs->read, obs->context});
             if (!patchTimer)
                 patchTimer = b._app.addTimer(kUnreadPatchMs, false, [this] {
                     patchTimer = 0;
@@ -644,33 +644,9 @@ void SlackBackend::Live::resyncUnreads() {
 void SlackBackend::Live::applyPatches() {
     for (const Patch &p : patches) {
         const ConvRef r = s.findConversation(p.id);
-        if (r == kNoConv || !b.snapshotAllowed(p.id, p.dispatchEpoch))
+        if (r == kNoConv)
             continue;
-        const model::Conversation &c           = s.conversation(r);
-        Ts                         newLastRead = 0, newLatest = 0;
-        uint32_t                   newUnread = 0, newMentions = 0;
-        b.reconcileCounts(
-            c,
-            p.info.lastRead,
-            p.info.latest,
-            p.info.unread,
-            p.info.unread,
-            false,
-            false,
-            newLastRead,
-            newLatest,
-            newUnread,
-            newMentions
-        );
-        if (newLastRead == c.lastRead && newLatest == c.latest && newUnread == c.unread &&
-            newMentions == c.mentions)
-            continue;
-        s.updateConversation(r, [&](model::Conversation &x) {
-            x.lastRead = newLastRead;
-            x.latest   = newLatest;
-            x.unread   = newUnread;
-            x.mentions = newMentions;
-        });
+        b.applyReadObservation(r, p.read, p.context);
     }
     patches.clear();
 }

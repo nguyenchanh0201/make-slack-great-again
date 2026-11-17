@@ -55,4 +55,10 @@ struct ReadDecision {
     const char *reason   = "";
 };
 
+struct ConversationObservation {
+    model::Conversation info;
+    Observation         read;
+    DispatchContext     context;
+};
+
 } // namespace slack::readstate

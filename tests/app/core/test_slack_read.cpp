@@ -1947,4 +1947,115 @@ TEST("dm zero polling: 429 queue, transport retry, joined calls, overflow 257, a
     CHECK(!destroyedCallbackRan);
 }
 
+TEST("dm zero sources: roster reload, two-page context isolation, coherent Meta, and cross-entry observer") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    const ConvRef d2 = e.conv("D2");
+    REQUIRE(d1 != kNoConv);
+    REQUIRE(d2 != kNoConv);
+
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+
+    // 1. Roster reload: explicit zero clears D1 despite latest=300; missing count preserves D2=5.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    e.store.updateConversation(d2, [&](model::Conversation &c) {
+        c.lastRead = ts200;
+        c.latest   = ts300;
+        c.unread   = 5;
+        c.mentions = 2;
+    });
+
+    // Track coherent Meta emissions: each changed conversation emits at most one Meta update.
+    int metaD1 = 0;
+    e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Meta)
+            ++metaD1;
+    });
+
+    set(R"({"users.conversations":{"ok":true,"channels":[
+        {"id":"C1","name":"general","is_channel":true,"is_member":true},
+        {"id":"D1","is_im":true,"user":"UMIRA","last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},"unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}],
+        "response_metadata":{"next_cursor":"p2"}},
+        "users.conversations?cursor=p2":{"ok":true,"channels":[
+        {"id":"D2","is_im":true,"user":"UEXT","last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"}},
+        {"id":"G1","is_mpim":true,"name":"mpdm-me--mira--jonas-1"},
+        {"id":"C2","name":"random","is_channel":true,"is_member":true,"is_muted":true}],
+        "response_metadata":{"next_cursor":""}}})");
+
+    const int ucBefore = Log().count("users.conversations");
+    e.be->reloadConversationsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("users.conversations") >= ucBefore + 2; }));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == ts200; }));
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    CHECK(metaD1 == 1);
+    CHECK(e.store.conversation(d2).unread == 5);
+    CHECK(e.store.conversation(d2).mentions == 2);
+
+    // 2. Two roster pages with different dispatch contexts + cross-entry synchronous observer:
+    // Page 1 has D1; Page 2 has D2 (delayed). While Page 1 is in flight (or via observer on D1),
+    // D2 is marked unread -> Page 1's older context cannot clear D1 if marked, and Page 2 cannot
+    // lend its freshness to Page 1.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    e.store.updateConversation(d2, [&](model::Conversation &c) {
+        c.lastRead = ts300;
+        c.latest   = ts300;
+        c.unread   = 0;
+        c.mentions = 0;
+    });
+    // Add a message at ts300 on D2 so markUnread(d2, ts300) sets desired = ts300 - 1.
+    model::Message mD2;
+    mD2.ts   = ts300;
+    mD2.user = e.store.findUser("UEXT");
+    mD2.text = "d2 msg";
+    e.store.addMessage(d2, std::move(mD2));
+
+    bool markedD2InObserver = false;
+    e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Meta && !markedD2InObserver) {
+            markedD2InObserver = true;
+            e.be->markUnread(d2, ts300);
+        }
+    });
+
+    script("users.conversations", R"([
+        {"ok":true,"channels":[
+            {"id":"C1","name":"general","is_channel":true,"is_member":true},
+            {"id":"D1","is_im":true,"user":"UMIRA","last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},"unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}],
+         "response_metadata":{"next_cursor":"p2"}},
+        {"ok":true,"channels":[
+            {"id":"D2","is_im":true,"user":"UEXT","last_read":"1800000000.000300","latest":{"ts":"1800000000.000300"},"unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0},
+            {"id":"G1","is_mpim":true,"name":"mpdm-me--mira--jonas-1"},
+            {"id":"C2","name":"random","is_channel":true,"is_member":true,"is_muted":true}],
+         "response_metadata":{"next_cursor":""}}])");
+    const int uc2 = Log().count("users.conversations");
+    e.be->reloadConversationsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("users.conversations") >= uc2 + 2; }));
+    REQUIRE(pumpUntil([&] { return markedD2InObserver; }));
+    // D2 was marked unread by D1's observer before D2's roster merge ran: D2's markUnread must survive!
+    CHECK(e.store.conversation(d2).lastRead == ts300 - 1);
+    CHECK(e.store.conversation(d2).unread >= 1);
+
+    // 3. Empty client.counts snapshot must not silently clear every conversation.
+    script("client.counts", R"([{"ok":true,"channels":[],"ims":[],"mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    fakeslack::pumpFor(100);
+    CHECK(e.store.conversation(d2).unread >= 1);
+}
+
 #endif // !_WIN32
