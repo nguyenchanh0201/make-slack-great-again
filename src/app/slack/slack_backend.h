@@ -248,9 +248,14 @@ public:
     void reloadConversationsForTest() { reloadConversations(); }
     readstate::DispatchContext captureReadDispatchForTest() { return captureReadDispatch(); }
     void recordUnreadArrivalForTest(
-        model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions
+        model::ConvRef   c,
+        model::Ts        ts,
+        uint32_t         unread,
+        uint32_t         mentions,
+        readstate::Scope scope      = readstate::Scope::MainConversation,
+        model::Ts        threadRoot = 0
     ) {
-        recordUnreadArrival(c, ts, unread, mentions);
+        recordUnreadArrival(c, ts, unread, mentions, scope, threadRoot);
     }
     void applyReadObservationForTest(
         model::ConvRef                  c,
@@ -360,7 +365,14 @@ private:
     );
     // Per-conversation local read/unread intent & generation reconciliation.
     readstate::DispatchContext captureReadDispatch();
-    void recordUnreadArrival(model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions);
+    void recordUnreadArrival(
+        model::ConvRef   c,
+        model::Ts        ts,
+        uint32_t         unread,
+        uint32_t         mentions,
+        readstate::Scope scope      = readstate::Scope::MainConversation,
+        model::Ts        threadRoot = 0
+    );
     void retireReadEvidence(const std::string &channel, model::Ts through);
     void applyReadObservation(
         model::ConvRef                    c,

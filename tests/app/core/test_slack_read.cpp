@@ -2138,4 +2138,157 @@ TEST("dm zero trace: opt-in slack-read trace logs decisions without leaking name
     CHECK(logged.find("D1") == std::string::npos);
 }
 
+TEST("dm scope accounting: missing counts preserve totals and old zero snapshots preserve newer arrivals") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    const Ts ts100 = model::parseTs("1800000000.000100");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+    const Ts ts400 = model::parseTs("1800000000.000400");
+
+    // 1. Missing-count observation must not double-count an arrival already in current totals.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts100;
+        c.latest   = ts400;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    const auto ctxBeforeArrival = e.be->captureReadDispatchForTest();
+    e.be->recordUnreadArrivalForTest(d1, ts400, 1, 1);
+
+    slack::readstate::Observation missingCounts;
+    missingCounts.source   = slack::readstate::Source::Roster;
+    missingCounts.lastRead = ts100;
+    missingCounts.latest   = ts300;
+
+    e.be->applyReadObservationForTest(d1, missingCounts, ctxBeforeArrival);
+    CHECK(e.store.conversation(d1).unread == 1);
+    CHECK(e.store.conversation(d1).mentions == 1);
+
+    // Repeating the missing-count observation must still preserve 1/1.
+    e.be->applyReadObservationForTest(d1, missingCounts, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 1);
+    CHECK(e.store.conversation(d1).mentions == 1);
+
+    // 2. Two consecutive old zero snapshots must both preserve an arrival at 400
+    // even when the arrival was known before dispatch.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts100;
+        c.latest   = ts400;
+        c.unread   = 1;
+        c.mentions = 0;
+    });
+    const auto ctxAfterArrival = e.be->captureReadDispatchForTest();
+
+    slack::readstate::Observation oldZero;
+    oldZero.source           = slack::readstate::Source::Counts;
+    oldZero.lastRead         = ts100;
+    oldZero.latest           = ts300;
+    oldZero.hasUnreads       = false;
+    oldZero.display.unread   = {0, true};
+    oldZero.display.mentions = {0, true};
+
+    e.be->applyReadObservationForTest(d1, oldZero, ctxAfterArrival);
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    e.be->applyReadObservationForTest(d1, oldZero, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    // A later comparable baseline covering 400 absorbs it exactly once.
+    slack::readstate::Observation coveringBaseline;
+    coveringBaseline.source           = slack::readstate::Source::Counts;
+    coveringBaseline.lastRead         = ts100;
+    coveringBaseline.latest           = ts400;
+    coveringBaseline.display.unread   = {1, true};
+    coveringBaseline.display.mentions = {0, true};
+
+    e.be->applyReadObservationForTest(d1, coveringBaseline, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 1);
+    e.be->applyReadObservationForTest(d1, coveringBaseline, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    // Scripted HTTP variant: client.counts omitting counts and then returning old zero.
+    const Ts ts500 = model::parseTs("1800000000.000500");
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts100;
+        c.latest   = ts500;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    e.be->recordUnreadArrivalForTest(d1, ts500, 1, 1);
+
+    script("client.counts", R"([{"ok":true,"channels":[{"id":"C1","latest":"1800000000.000100","last_read":"1800000000.000100","mention_count":0,"has_unreads":false}],
+        "ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100"}],
+        "mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 2; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 1);
+    CHECK(e.store.conversation(d1).mentions == 1);
+
+    script("client.counts", R"([
+        {"ok":true,"channels":[],"ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100","has_unreads":false,"dm_count":0}],"mpims":[]},
+        {"ok":true,"channels":[],"ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100","has_unreads":false,"dm_count":0}],"mpims":[]},
+        {"ok":true,"channels":[],"ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100","has_unreads":false,"dm_count":0}],"mpims":[]},
+        {"ok":true,"channels":[],"ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000100","has_unreads":false,"dm_count":0}],"mpims":[]}
+    ])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 3; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 1);
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 4; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    // 3. Independent unread/mention omissions, exact 5->2 + 1 disjoint, and missing-count
+    // must not clear overflow invalidation.
+    const Ts ts600 = model::parseTs("1800000000.000600");
+    const Ts ts700 = model::parseTs("1800000000.000700");
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts100;
+        c.latest   = ts600;
+        c.unread   = 5;
+        c.mentions = 2;
+    });
+    const auto ctxBeforeExact = e.be->captureReadDispatchForTest();
+    e.be->recordUnreadArrivalForTest(d1, ts700, 1, 0);
+    slack::readstate::Observation exactTwo;
+    exactTwo.source           = slack::readstate::Source::Counts;
+    exactTwo.lastRead         = ts100;
+    exactTwo.latest           = ts600;
+    exactTwo.display.unread   = {2, true};
+    exactTwo.display.mentions = {1, true};
+    e.be->applyReadObservationForTest(d1, exactTwo, ctxBeforeExact);
+    CHECK(e.store.conversation(d1).unread == 3);
+    CHECK(e.store.conversation(d1).mentions == 1);
+
+    // Overflow invalidation: missing-count response must not clear overflow invalidation.
+    for (int i = 1; i <= 260; ++i) {
+        const Ts ts = ts700 + i;
+        e.be->recordUnreadArrivalForTest(d1, ts, 1, 0);
+    }
+    const auto ctxAfterOverflow = e.be->captureReadDispatchForTest();
+    slack::readstate::Observation noCountsObs;
+    noCountsObs.source   = slack::readstate::Source::Roster;
+    noCountsObs.lastRead = ts100;
+    noCountsObs.latest   = ts700 + 260;
+    e.be->applyReadObservationForTest(d1, noCountsObs, ctxAfterOverflow);
+    // Overflow must still be active: a subsequent missing-count observation cannot clear it,
+    // and an exact baseline clears it once caught up.
+    slack::readstate::Observation exactCatchup;
+    exactCatchup.source           = slack::readstate::Source::Counts;
+    exactCatchup.lastRead         = ts100;
+    exactCatchup.latest           = ts700 + 260;
+    exactCatchup.display.unread   = {4, true};
+    exactCatchup.display.mentions = {0, true};
+    e.be->applyReadObservationForTest(d1, exactCatchup, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 4);
+}
+
 #endif // !_WIN32

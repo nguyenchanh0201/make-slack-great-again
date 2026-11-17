@@ -1375,7 +1375,7 @@ readstate::ReadDecision SlackBackend::Read::carryLocal(
     const readstate::DispatchContext *context
 ) const {
     readstate::ReadDecision decision{
-        old.lastRead, old.latest, old.unread, old.mentions, true, false, "preserve"
+        old.lastRead, old.latest, old.unread, old.mentions, true, false, false, "preserve", {}
     };
     if (!obs || !context) {
         fresh.lastRead = old.lastRead;
@@ -3956,7 +3956,7 @@ readstate::DispatchContext SlackBackend::captureReadDispatch() {
 }
 
 void SlackBackend::recordUnreadArrival(
-    ConvRef c, Ts ts, uint32_t unread, uint32_t mentions
+    ConvRef c, Ts ts, uint32_t unread, uint32_t mentions, readstate::Scope scope, Ts threadRoot
 ) {
     if (c >= _store.conversationCount() || ts <= 0 || (unread == 0 && mentions == 0))
         return;
@@ -3965,7 +3965,7 @@ void SlackBackend::recordUnreadArrival(
         return;
     ReadIntent &in = _readIntent[channel];
     for (const readstate::Arrival &a : in.arrivals)
-        if (a.ts == ts)
+        if (a.ts == ts && a.scope == scope && a.threadRoot == threadRoot)
             return; // duplicate delivery counts once
     const uint64_t seq = ++_arrivalEpoch;
     static constexpr size_t kMaxArrivalsPerConv = 256;
@@ -3974,7 +3974,7 @@ void SlackBackend::recordUnreadArrival(
         queueReadReconcile(channel);
         return;
     }
-    in.arrivals.push_back({ts, seq, unread, mentions});
+    in.arrivals.push_back({ts, seq, unread, mentions, scope, threadRoot});
 }
 
 void SlackBackend::retireReadEvidence(const std::string &channel, Ts through) {
@@ -4004,7 +4004,7 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
     bool                              allowBackwardCursor
 ) const {
     readstate::ReadDecision out{
-        candidate.lastRead, candidate.latest, candidate.unread, candidate.mentions, false, false, ""
+        candidate.lastRead, candidate.latest, candidate.unread, candidate.mentions, false, false, false, "", {}
     };
     if (c >= _store.conversationCount()) {
         out.reason = "invalid-conv";
@@ -4078,20 +4078,33 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
         exactMentions = *obs.raw.mentions.value;
     }
 
+    const std::optional<Ts> obsThrough = obs.coverage.through ? obs.coverage.through : obs.latest;
+
     uint32_t disjointUnread = 0, overlapUnread = 0;
     uint32_t disjointMentions = 0, overlapMentions = 0;
     if (in) {
         for (const readstate::Arrival &a : in->arrivals) {
-            if (a.ts <= newLastRead)
+            if (a.scope != readstate::Scope::MainConversation)
                 continue;
-            const bool postDispatch = a.sequence > context.arrivalEpoch;
-            const bool afterObsLatest = !obs.latest.has_value() || a.ts > *obs.latest;
-            if (afterObsLatest) {
+            if (a.ts <= newLastRead) {
+                out.absorbedSequences.push_back(a.sequence);
+                continue;
+            }
+            const bool postDispatch    = a.sequence > context.arrivalEpoch;
+            const bool afterObsThrough = !obsThrough.has_value() || a.ts > *obsThrough;
+            if (afterObsThrough) {
                 disjointUnread += a.unread;
                 disjointMentions += a.mentions;
             } else if (postDispatch) {
                 overlapUnread += a.unread;
                 overlapMentions += a.mentions;
+            } else if (obs.coverage.scope != readstate::Scope::Thread) {
+                const bool unreadCovered   = a.unread == 0 || exactUnread.has_value();
+                const bool mentionsCovered = a.mentions == 0 || exactMentions.has_value() ||
+                                             (exactUnread.has_value() &&
+                                              (*exactUnread == 0 || candidate.isDirect()));
+                if (unreadCovered && mentionsCovered)
+                    out.absorbedSequences.push_back(a.sequence);
             }
         }
     }
@@ -4118,7 +4131,7 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
         } else if (lowerBoundUnread.has_value()) {
             newUnread = std::max({candidate.unread, *lowerBoundUnread, disjointUnread + overlapUnread});
         } else {
-            newUnread = candidate.unread + disjointUnread;
+            newUnread = std::max(candidate.unread, disjointUnread + overlapUnread);
         }
 
         if (exactMentions.has_value()) {
@@ -4138,9 +4151,11 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
             newMentions = newUnread;
         } else if (candidate.isDirect() && obs.source == readstate::Source::Counts &&
                    lowerBoundUnread.has_value()) {
-            newMentions = std::max(candidate.mentions, *lowerBoundUnread) + disjointMentions;
+            newMentions = std::max(
+                {candidate.mentions, *lowerBoundUnread, disjointMentions + overlapMentions}
+            );
         } else {
-            newMentions = candidate.mentions + disjointMentions;
+            newMentions = std::max(candidate.mentions, disjointMentions + overlapMentions);
         }
 
         const bool muted = candidate.muted || candidate.notify == model::NotifyLevel::Nothing;
@@ -4148,13 +4163,14 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
             newUnread = newMentions;
     }
 
-    out.lastRead = newLastRead;
-    out.latest   = newLatest;
-    out.unread   = newUnread;
-    out.mentions = newMentions;
-    out.accept   = true;
-    out.refresh  = needsRefresh;
-    out.reason   = needsRefresh ? "accept-refresh" : "accept";
+    out.lastRead       = newLastRead;
+    out.latest         = newLatest;
+    out.unread         = newUnread;
+    out.mentions       = newMentions;
+    out.accept         = true;
+    out.refresh        = needsRefresh;
+    out.clearsOverflow = (newLatest <= newLastRead) || (exactUnread.has_value() && !needsRefresh);
+    out.reason         = needsRefresh ? "accept-refresh" : "accept";
     return out;
 }
 
@@ -4187,23 +4203,30 @@ bool SlackBackend::commitReadDecision(
             in.arrivals.end(),
             [&](const readstate::Arrival &a) { return a.sequence > context.arrivalEpoch; }
         );
-        if (context.arrivalEpoch < in.invalidatedEpoch || newerArrival) {
+        if (context.arrivalEpoch < in.invalidatedEpoch || newerArrival || !decision.clearsOverflow) {
             queueReadReconcile(channel);
-            return false;
+            if (context.arrivalEpoch < in.invalidatedEpoch || newerArrival)
+                return false;
+        } else {
+            in.invalidatedEpoch = 0;
         }
-        in.invalidatedEpoch = 0;
     }
 
     in.acceptedObsEpoch   = ++_observationEpoch;
     in.acceptedDispatchId = context.dispatchId;
-    // Retire arrivals covered by the accepted read cursor or absorbed by this baseline.
+    // Retire arrivals covered by the accepted read cursor or explicitly absorbed by this baseline.
     in.arrivals.erase(
         std::remove_if(
             in.arrivals.begin(),
             in.arrivals.end(),
             [&](const readstate::Arrival &a) {
-                return a.ts <= decision.lastRead ||
-                       (a.sequence <= context.arrivalEpoch && a.ts <= decision.latest);
+                if (a.scope == readstate::Scope::MainConversation && a.ts <= decision.lastRead)
+                    return true;
+                return std::find(
+                           decision.absorbedSequences.begin(),
+                           decision.absorbedSequences.end(),
+                           a.sequence
+                       ) != decision.absorbedSequences.end();
             }
         ),
         in.arrivals.end()
