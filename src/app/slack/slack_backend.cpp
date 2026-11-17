@@ -3943,40 +3943,6 @@ uint64_t SlackBackend::readDispatchEpoch() const {
     return _read ? _read->lastDispatchEpoch : 0;
 }
 
-void SlackBackend::applyAuthoritativeReadObservation(
-    ConvRef c, Ts lastRead, Ts latest, uint32_t unread, uint32_t mentions, bool allowBackwardCursor
-) {
-    if (c >= _store.conversationCount())
-        return;
-    const model::Conversation &cur         = _store.conversation(c);
-    const Ts                   newLastRead = allowBackwardCursor ? lastRead : std::max(cur.lastRead, lastRead);
-    const Ts                   newLatest   = std::max(cur.latest, latest);
-    uint32_t                   newUnread   = cur.unread;
-    uint32_t                   newMentions = cur.mentions;
-
-    if (newLatest > newLastRead) {
-        if (unread > 0) {
-            const bool     muted = cur.muted || cur.notify == model::NotifyLevel::Nothing;
-            const uint32_t m     = cur.isDirect() ? std::max(unread, mentions) : mentions;
-            newUnread            = muted ? m : std::max(unread, m);
-            newMentions          = m;
-        }
-    } else {
-        newUnread   = 0;
-        newMentions = 0;
-    }
-
-    if (newLastRead != cur.lastRead || newLatest != cur.latest || newUnread != cur.unread ||
-        newMentions != cur.mentions) {
-        _store.updateConversation(c, [&](model::Conversation &x) {
-            x.lastRead = newLastRead;
-            x.latest   = newLatest;
-            x.unread   = newUnread;
-            x.mentions = newMentions;
-        });
-    }
-}
-
 readstate::DispatchContext SlackBackend::captureReadDispatch() {
     return {++_nextDispatchId, _readEpoch, _arrivalEpoch, _observationEpoch};
 }
@@ -4348,11 +4314,13 @@ void SlackBackend::readCallObservedForTest(
 }
 
 void SlackBackend::applyMarkedEvent(
-    const std::string &channel, Ts ts, uint32_t unread, uint32_t mentions
+    const std::string &channel, const readstate::Observation &obs
 ) {
     const ConvRef c = _store.findConversation(channel);
-    if (c == kNoConv)
+    if (c == kNoConv || !obs.lastRead.has_value() || *obs.lastRead <= 0)
         return;
+    const Ts                   ts  = *obs.lastRead;
+    const model::Conversation &cur = _store.conversation(c);
     if (const auto it = _readIntent.find(channel); it != _readIntent.end()) {
         ReadIntent &in = it->second;
         if (in.pending) {
@@ -4361,20 +4329,29 @@ void SlackBackend::applyMarkedEvent(
             in.awaitingEcho = false;
         } else if (in.awaitingEcho) {
             if (ts != in.desired) {
-                reconcileConversationReadState(channel);
+                queueReadReconcile(channel);
                 return;
             }
             in.awaitingEcho = false;
-        } else if (ts < _store.conversation(c).lastRead) {
-            reconcileConversationReadState(channel);
+        } else if (ts < cur.lastRead) {
+            queueReadReconcile(channel);
             return;
         }
-    } else if (ts < _store.conversation(c).lastRead) {
-        reconcileConversationReadState(channel);
+    } else if (ts < cur.lastRead) {
+        queueReadReconcile(channel);
         return;
     }
-    const Ts latest = _store.conversation(c).latest;
-    applyAuthoritativeReadObservation(c, ts, latest, unread, mentions, true);
+    if (!obs.display.unread.value.has_value()) {
+        queueReadReconcile(channel);
+        return;
+    }
+    const uint32_t dispUnread = *obs.display.unread.value;
+    if ((dispUnread == 0 && cur.latest > ts) ||
+        (dispUnread > 0 && ts == cur.lastRead && cur.unread == 0)) {
+        queueReadReconcile(channel);
+        return;
+    }
+    applyReadObservation(c, obs, captureReadDispatch(), /*allowBackwardCursor=*/true);
 }
 
 void SlackBackend::reloadConversations() {

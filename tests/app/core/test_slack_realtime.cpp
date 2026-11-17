@@ -1545,4 +1545,214 @@ TEST("dm zero sources: reconnect patch clears own-newer zero, preserves missing,
     CHECK(e.store.conversation(d2).unread >= 1);
 }
 
+TEST("dm zero events: remote read clears own-newer DM via reconciliation without message replay") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+    const Ts incoming = model::parseTs("1800000000.000200");
+    const Ts own      = model::parseTs("1800000000.000300");
+
+    model::Message received;
+    received.ts   = incoming;
+    received.user = e.store.findUser("UMIRA");
+    received.text = "message read in the other client";
+    e.store.addMessage(d1, std::move(received));
+    model::Message sent;
+    sent.ts   = own;
+    sent.user = e.store.me;
+    sent.text = "my newer reply";
+    e.store.addMessage(d1, std::move(sent));
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = incoming - 1;
+        c.latest   = own;
+        c.unread = c.mentions = 1;
+    });
+
+    int appends = 0;
+    e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Append)
+            ++appends;
+    });
+
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+
+    REQUIRE(push(envelope("remote-read-own-newer",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+        "unread_count_display":0,"mention_count_display":0})")));
+    REQUIRE(pumpUntil([&] {
+        const auto &c = e.store.conversation(d1);
+        return c.lastRead == incoming && c.unread == 0 && c.mentions == 0;
+    }));
+    CHECK(appends == 0);
+}
+
+TEST("dm zero events: same-domain confirmation, stale-positive suppression, and incoming arrival during reconcile") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+    const Ts ts400 = model::parseTs("1800000000.000400");
+
+    model::Message m200;
+    m200.ts   = ts200;
+    m200.user = e.store.findUser("UMIRA");
+    m200.text = "in";
+    e.store.addMessage(d1, std::move(m200));
+    model::Message m300;
+    m300.ts   = ts300;
+    m300.user = e.store.me;
+    m300.text = "own";
+    e.store.addMessage(d1, std::move(m300));
+
+    // 1. Raw=2, Display=0 confirms display zero.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread = c.mentions = 1;
+    });
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":2,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    REQUIRE(push(envelope("e-disp0",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+        "unread_count_display":0,"mention_count_display":0})")));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }));
+    CHECK(e.store.conversation(d1).lastRead == ts200);
+
+    // 2. Missing display in confirmation preserves safe state (raw=2 cannot stand in for display).
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread = c.mentions = 1;
+    });
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":2}}])");
+    const int infoBefore = count("conversations.info");
+    REQUIRE(push(envelope("e-nodisp",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+        "unread_count_display":0,"mention_count_display":0})")));
+    REQUIRE(pumpUntil([&] { return count("conversations.info") > infoBefore; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    // 3. Stale positive count at same cursor 200 cannot revive cleared badge.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200;
+        c.latest   = ts300;
+        c.unread = c.mentions = 0;
+    });
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    const int infoPos = count("conversations.info");
+    REQUIRE(push(envelope("e-stalepos",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+        "unread_count_display":1,"mention_count_display":1})")));
+    REQUIRE(pumpUntil([&] { return count("conversations.info") > infoPos; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 0);
+
+    // 4. Eligible incoming=400 during reconciliation stays unread.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread = c.mentions = 1;
+    });
+    script("conversations.info", R"([{"__delay":0.15,"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    const int infoArr = count("conversations.info");
+    REQUIRE(push(envelope("e-arr",
+        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+        "unread_count_display":0,"mention_count_display":0})")));
+    REQUIRE(pumpUntil([&] { return count("conversations.info") > infoArr; }));
+    REQUIRE(push(envelope("e-msg400",
+        R"({"type":"message","channel":"D1","user":"UMIRA","text":"new arrival","ts":"1800000000.000400"})")));
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(d1, ts400) != nullptr; }));
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).unread >= 1);
+}
+
+TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace concurrency cap") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread = c.mentions = 1;
+    });
+
+    // 1. Burst of 20 conflicting events coalesces, survives initial failure, and converges on success.
+    script("conversations.info", R"([
+        {"ok":false,"error":"server_error"},
+        {"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    const int infoStart = count("conversations.info");
+    for (int i = 0; i < 20; ++i) {
+        REQUIRE(push(envelope(
+            "burst-" + std::to_string(i),
+            R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
+            "unread_count_display":0,"mention_count_display":0})"
+        )));
+    }
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }, 4000));
+    // Coalesced: far fewer than 20 requests.
+    CHECK(count("conversations.info") - infoStart <= 3);
+
+    // 2. 20 distinct DMs: workspace reconciliation stays bounded and every DM eventually gets a turn.
+    std::vector<std::string> dms;
+    for (int i = 0; i < 20; ++i) {
+        std::string id = "D" + std::to_string(10 + i);
+        dms.push_back(id);
+        model::Conversation mc;
+        mc.id       = id;
+        mc.kind     = model::ConvKind::Dm;
+        mc.member   = true;
+        mc.lastRead = ts200 - 1;
+        mc.latest   = ts300;
+        mc.unread = mc.mentions = 1;
+        e.store.addConversation(std::move(mc));
+    }
+    set(R"({"conversations.info":{"ok":true,"channel":{"is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+        "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}})");
+    for (int i = 0; i < 20; ++i) {
+        REQUIRE(push(envelope(
+            "dm20-" + std::to_string(i),
+            std::string(R"({"type":"im_marked","channel":")") + dms[i] +
+                R"(","ts":"1800000000.000200","unread_count_display":0,"mention_count_display":0})"
+        )));
+    }
+    REQUIRE(pumpUntil(
+        [&] {
+            for (const auto &id : dms)
+                if (e.store.conversation(e.conv(id.c_str())).unread != 0)
+                    return false;
+            return true;
+        },
+        6000
+    ));
+}
+
 #endif

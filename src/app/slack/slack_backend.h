@@ -381,18 +381,8 @@ private:
     void     pumpReadReconcile();
     uint64_t noteLocalMark(const std::string &channel, model::Ts desired);
     void     onMarkQueueDrained(const std::string &channel, uint64_t gen, bool ok);
-    void     applyMarkedEvent(
-        const std::string &channel, model::Ts ts, uint32_t unread, uint32_t mentions
-    );
+    void     applyMarkedEvent(const std::string &channel, const readstate::Observation &obs);
     void     reconcileConversationReadState(const std::string &channel);
-    void     applyAuthoritativeReadObservation(
-        model::ConvRef c,
-        model::Ts      lastRead,
-        model::Ts      latest,
-        uint32_t       unread,
-        uint32_t       mentions,
-        bool           allowBackwardCursor
-    );
     bool     snapshotAllowed(const std::string &channel, uint64_t dispatchEpoch) const;
     uint64_t readDispatchEpoch() const;
     // A read call with rate limits,

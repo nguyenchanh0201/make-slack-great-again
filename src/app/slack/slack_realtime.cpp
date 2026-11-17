@@ -294,9 +294,7 @@ void SlackBackend::Live::apply(const json::Value &ev, bool ours) {
         type == "mpim_marked") {
         b.applyMarkedEvent(
             std::string(ev["channel"].str()),
-            model::parseTs(ev["ts"].str()),
-            uint32_t(ev["unread_count_display"].integer()),
-            uint32_t(ev["mention_count_display"].integer())
+            mapjson::conversationReadObservation(ev, readstate::Source::Marked)
         );
         return;
     }
