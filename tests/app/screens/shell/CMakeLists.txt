@@ -5,10 +5,11 @@ target_link_libraries(msga_app_tests PRIVATE msga_screens_shell msga_app_fake ms
 # Headless plat, a pinned zone, and a throwaway HOME/XDG so the tests never
 # touch the user's settings or font index cache.
 set(_home "${CMAKE_CURRENT_BINARY_DIR}/test-home")
-foreach(s shell shortcuts pages shell_ui agents agent_ui links_ui unified_search theme_chrome)
+foreach(s shell shortcuts pages shell_ui agents agent_ui links_ui unified_search theme_chrome slack_dm_read)
     target_sources(msga_app_tests PRIVATE test_${s}.cpp)
 endforeach()
 msga_add_test(shell_tests COMMAND msga_app_tests test_shell TZ HOME ${_home} LABELS shell)
+msga_add_test(slack_dm_read_tests COMMAND msga_app_tests test_slack_dm_read TZ HOME ${_home} LABELS shell)
 msga_add_test(shortcut_tests COMMAND msga_app_tests test_shortcuts TZ HOME ${_home} LABELS shell)
 msga_add_test(pages_tests COMMAND msga_app_tests test_pages TZ HOME ${_home} LABELS shell)
 msga_add_test(shell_ui_tests COMMAND msga_app_tests test_shell_ui TZ HOME ${_home} LABELS shell)

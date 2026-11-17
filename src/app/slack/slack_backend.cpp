@@ -4343,7 +4343,9 @@ void SlackBackend::applyReadObservation(
             x.mentions = d.mentions;
         });
     }
-    traceReadObservation(c, obs, context, curLastRead, curUnread, curMentions, d.reason);
+    traceReadObservation(
+        c, obs, context, curLastRead, curUnread, curMentions, d.reason, d.absorbedSequences.size()
+    );
 }
 
 void SlackBackend::traceReadObservation(
@@ -4353,21 +4355,41 @@ void SlackBackend::traceReadObservation(
     Ts                                beforeRead,
     uint32_t                          beforeUnread,
     uint32_t                          beforeMentions,
-    const char                       *decision
+    const char                       *decision,
+    size_t                            absorbedArrivals
 ) const {
     const char *env = std::getenv("MSGA_SLACK_READ_TRACE");
     if (!env || std::strcmp(env, "1") != 0 || c >= _store.conversationCount())
         return;
     static constexpr const char *kSources[] = {"info", "roster", "counts", "marked", "reconcile"};
+    static constexpr const char *kScopes[]  = {"unknown", "main", "thread"};
     const int                    si         = int(obs.source);
-    const char *src = (si >= 0 && si < 5) ? kSources[si] : "unknown";
+    const int                    sci        = int(obs.coverage.scope);
+    const char *src   = (si >= 0 && si < 5) ? kSources[si] : "unknown";
+    const char *scope = (sci >= 0 && sci < 3) ? kScopes[sci] : "unknown";
     const model::Conversation &after = _store.conversation(c);
+    size_t                     retainedArrivals = 0;
+    if (const auto it = _readIntent.find(after.id); it != _readIntent.end())
+        retainedArrivals = it->second.arrivals.size();
+    auto fmtCount = [](const readstate::Count &cnt) -> std::string {
+        return cnt.value.has_value() ? std::to_string(*cnt.value) : "-";
+    };
+    const std::string rawU  = fmtCount(obs.raw.unread);
+    const std::string rawM  = fmtCount(obs.raw.mentions);
+    const std::string dispU = fmtCount(obs.display.unread);
+    const std::string dispM = fmtCount(obs.display.mentions);
+    const char       *hu    = obs.hasUnreads.has_value() ? (*obs.hasUnreads ? "1" : "0") : "-";
+    const long long   covThrough =
+        obs.coverage.through.has_value() ? (long long)*obs.coverage.through : -1LL;
+    const long long obsLatest = obs.latest.has_value() ? (long long)*obs.latest : -1LL;
     LOG_INFO(
         "slack-read",
-        "conv=%u src=%s decision=%s before=(%lld,%u,%u) after=(%lld,%u,%u) "
-        "ctx=(%llu,%llu,%llu,%llu)",
+        "conv=%u src=%s scope=%s decision=%s before=(%lld,%u,%u) after=(%lld,%u,%u) "
+        "raw=(%s,%s) disp=(%s,%s) hu=%s cov=(%s,%lld,%d) obs_latest=%lld act_latest=%lld "
+        "arr=(ret=%zu,abs=%zu) ctx=(%llu,%llu,%llu,%llu)",
         unsigned(c),
         src,
+        scope,
         decision ? decision : "",
         (long long)beforeRead,
         beforeUnread,
@@ -4375,6 +4397,18 @@ void SlackBackend::traceReadObservation(
         (long long)after.lastRead,
         after.unread,
         after.mentions,
+        rawU.c_str(),
+        rawM.c_str(),
+        dispU.c_str(),
+        dispM.c_str(),
+        hu,
+        scope,
+        covThrough,
+        obs.coverage.complete ? 1 : 0,
+        obsLatest,
+        (long long)after.latest,
+        retainedArrivals,
+        absorbedArrivals,
         (unsigned long long)context.dispatchId,
         (unsigned long long)context.readEpoch,
         (unsigned long long)context.arrivalEpoch,

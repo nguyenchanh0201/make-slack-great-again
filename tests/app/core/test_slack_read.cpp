@@ -2142,6 +2142,14 @@ TEST("dm zero trace: opt-in slack-read trace logs decisions without leaking name
     const std::string logged = readLog();
     std::remove(logPath.c_str());
     CHECK(logged.find("slack-read:") != std::string::npos);
+    CHECK(logged.find("scope=") != std::string::npos);
+    CHECK(logged.find("raw=(") != std::string::npos);
+    CHECK(logged.find("disp=(") != std::string::npos);
+    CHECK(logged.find("hu=") != std::string::npos);
+    CHECK(logged.find("cov=(") != std::string::npos);
+    CHECK(logged.find("obs_latest=") != std::string::npos);
+    CHECK(logged.find("act_latest=") != std::string::npos);
+    CHECK(logged.find("arr=(ret=") != std::string::npos);
     CHECK(logged.find("decision=accept") != std::string::npos);
     CHECK(logged.find("decision=superseded-observation") != std::string::npos);
     CHECK(logged.find("decision=defer-ambiguous") != std::string::npos);

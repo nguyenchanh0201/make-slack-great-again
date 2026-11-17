@@ -1753,7 +1753,7 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
         mc.unread = mc.mentions = 1;
         e.store.addConversation(std::move(mc));
     }
-    set(R"({"conversations.info":{"ok":true,"channel":{"is_im":true,"user":"UMIRA",
+    set(R"({"conversations.info":{"__delay":0.02,"ok":true,"channel":{"is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}})");
     for (int i = 0; i < 20; ++i) {
@@ -1763,6 +1763,10 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
                 R"(","ts":"1800000000.000200","unread_count_display":0,"mention_count_display":0})"
         )));
     }
+    // Foreground history request completes while background reconciliations remain queued.
+    bool fgDone = false;
+    e.be->loadHistory(e.conv("C1"), 0, [&](bool, const std::string &) { fgDone = true; });
+    REQUIRE(pumpUntil([&] { return fgDone; }, 2000));
     REQUIRE(pumpUntil(
         [&] {
             for (const auto &id : dms)
@@ -1772,6 +1776,11 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
         },
         6000
     ));
+    json::Document statsDoc;
+    statsDoc.parse(ctl("GET", "/_ctl/request_stats").body, nullptr);
+    const json::Value infoStats = statsDoc.root()["conversations.info"];
+    CHECK(infoStats["peak"].integer() <= 1);
+    CHECK(infoStats["active"].integer() == 0);
 }
 
 TEST("dm scope live: captured main/thread read survives info=1, reconnect, and reversed order") {

@@ -405,7 +405,8 @@ private:
         model::Ts                         beforeRead,
         uint32_t                          beforeUnread,
         uint32_t                          beforeMentions,
-        const char                       *decision
+        const char                       *decision,
+        size_t                            absorbedArrivals = 0
     ) const;
     uint64_t noteLocalMark(const std::string &channel, model::Ts desired);
     void     onMarkQueueDrained(const std::string &channel, uint64_t gen, bool ok);

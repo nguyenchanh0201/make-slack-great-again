@@ -86,7 +86,7 @@ ws_no = [0]
 def reset():
     state.clear()
     state.update(log=[], scripts={}, table={}, history={}, last_ts=0.0, file_no=0,
-                 ws_extra=0, rtm_nopong=False)
+                 ws_extra=0, rtm_nopong=False, stats={})
     for h in list(sockets.values()):
         h.ws_close(1001)
     sockets.clear()
@@ -341,6 +341,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/_ctl/log':
             with lock:
                 self.send_json(state['log'])
+            return
+        if self.path == '/_ctl/request_stats':
+            with lock:
+                self.send_json(state['stats'])
+            return
         elif self.path.startswith('/update/'):  # /update/<version>/<sha256>.manifest
             version, sha = self.path[len('/update/'):].rsplit('.', 1)[0].split('/', 1)
             self.send_json({'version': int(version), 'updatedAt': '2026-10-01T00:00:00Z',
@@ -414,51 +419,65 @@ class Handler(BaseHTTPRequestHandler):
                 method = path[len('/api/'):]
             else:
                 return self.send_json({'ok': False, 'error': 'not_found'}, 404)
-            state['log'].append({'method': method, 'form': form,
-                                 'auth': self.headers.get('Authorization', ''),
-                                 'cookie': self.headers.get('Cookie', ''),
-                                 'ctype': ctype, 'len': len(raw)})
-            if method == 'upload':
-                state['log'][-1]['body'] = raw[:256].decode('latin-1')
-                body = ('OK - %d' % len(raw)).encode()
-                self.send_response(200)
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                return self.wfile.write(body)
-            queue = state['scripts'].get(method, [])
-            answer = queue.pop(0) if queue else None
-            default = DEFAULTS.get(method, lambda h, f: {'ok': True})
-            if answer is None:
-                standing = None
-                for k, v in form.items():
-                    standing = state['table'].get('%s?%s=%s' % (method, k, v))
+            tracked_method = method
+            st = state['stats'].setdefault(
+                method, {'started': 0, 'active': 0, 'peak': 0, 'finished': 0}
+            )
+            st['started'] += 1
+            st['active'] += 1
+            if st['active'] > st['peak']:
+                st['peak'] = st['active']
+            try:
+                state['log'].append({'method': method, 'form': form,
+                                     'auth': self.headers.get('Authorization', ''),
+                                     'cookie': self.headers.get('Cookie', ''),
+                                     'ctype': ctype, 'len': len(raw)})
+                if method == 'upload':
+                    state['log'][-1]['body'] = raw[:256].decode('latin-1')
+                    body = ('OK - %d' % len(raw)).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    return self.wfile.write(body)
+                queue = state['scripts'].get(method, [])
+                answer = queue.pop(0) if queue else None
+                default = DEFAULTS.get(method, lambda h, f: {'ok': True})
+                if answer is None:
+                    standing = None
+                    for k, v in form.items():
+                        standing = state['table'].get('%s?%s=%s' % (method, k, v))
+                        if standing:
+                            break
+                    standing = standing or state['table'].get(method)
                     if standing:
-                        break
-                standing = standing or state['table'].get(method)
-                if standing:
-                    answer = standing[0] if len(standing) == 1 else standing.pop(0)
-            if answer is None:
-                return self.send_json(default(self, form))
-            if answer.get('__partial'):
-                if answer.get('__deliver'):
-                    default(self, form)
-                # Some bytes of an answer, then the connection dies: the
-                # client can't tell whether the call landed (and must not
-                # silently resend it).
-                self.wfile.write(b'HTTP/1.1 200')
-                self.wfile.flush()
-                self.close_connection = True
-                return
-            delay = answer.get('__delay')
-            if delay:
-                # A slow Slack: this answer waits, the others don't.
-                answer = {k: v for k, v in answer.items() if k != '__delay'}
-                lock.release()
-                try:
-                    time.sleep(delay)
-                finally:
-                    lock.acquire()
-            return self.send_json(answer)
+                        answer = standing[0] if len(standing) == 1 else standing.pop(0)
+                if answer is None:
+                    return self.send_json(default(self, form))
+                if answer.get('__partial'):
+                    if answer.get('__deliver'):
+                        default(self, form)
+                    # Some bytes of an answer, then the connection dies: the
+                    # client can't tell whether the call landed (and must not
+                    # silently resend it).
+                    self.wfile.write(b'HTTP/1.1 200')
+                    self.wfile.flush()
+                    self.close_connection = True
+                    return
+                delay = answer.get('__delay')
+                if delay:
+                    # A slow Slack: this answer waits, the others don't.
+                    answer = {k: v for k, v in answer.items() if k != '__delay'}
+                    lock.release()
+                    try:
+                        time.sleep(delay)
+                    finally:
+                        lock.acquire()
+                return self.send_json(answer)
+            finally:
+                st = state['stats'].get(tracked_method)
+                if st is not None:
+                    st['active'] = max(0, st['active'] - 1)
+                    st['finished'] += 1
 
 
 class QuietServer(ThreadingHTTPServer):
