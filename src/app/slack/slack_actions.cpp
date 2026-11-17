@@ -1447,12 +1447,14 @@ void SlackBackend::markRead(ConvRef conv, Ts ts) {
     if (ts <= c.lastRead) {
         // Read already: nothing to tell Slack. Badges left from thread
         // replies or a stale count go once the newest message is seen.
+        retireReadEvidence(convId(conv), ts);
         if ((c.unread || c.mentions) && !c.messages.empty() && c.messages.back().ts == ts)
             _store.markRead(conv, ts);
         return;
     }
     _store.markRead(conv, ts);
     const std::string id  = convId(conv);
+    retireReadEvidence(id, ts);
     const uint64_t    gen = noteLocalMark(id, ts);
     _write->mark(id, model::formatTs(ts), gen);
 }

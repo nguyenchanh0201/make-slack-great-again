@@ -1431,6 +1431,7 @@ TEST("slack read: stale snapshots do not restore unread over newer read or erase
         return;
     Env e(kWorkspace, /*session=*/true);
     REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
     const ConvRef d1 = e.conv("D1");
     REQUIRE(d1 != kNoConv);
     const Ts ts100 = model::parseTs("1800000000.000100");
@@ -1621,6 +1622,329 @@ TEST("dm zero parsing: explicit zero, missing, malformed, and raw/display domain
         CHECK(!oAbsent.hasUnreads.has_value());
         CHECK(oAbsent.raw.mentions.value == 2);
     }
+}
+
+TEST("dm zero polling: zero observation clears stale badge with newer own reply but protects post-dispatch arrivals") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+    const Ts ts400 = model::parseTs("1800000000.000400");
+
+    // Seed: incoming at 200, own reply at 300, stale unread=1, mentions=1, lastRead=199.
+    model::Message m200;
+    m200.ts   = ts200;
+    m200.user = e.store.findUser("UMIRA");
+    m200.text = "incoming";
+    e.store.addMessage(d1, std::move(m200));
+    model::Message m300;
+    m300.ts   = ts300;
+    m300.user = e.store.me;
+    m300.text = "own reply";
+    e.store.addMessage(d1, std::move(m300));
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+
+    // 1. Zero observation at read=200 clears old count=1 despite latest=300 (own reply),
+    // even when mention_count is omitted.
+    script("client.counts", R"([{"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000200",
+                "dm_count":0,"has_unreads":false}],"mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == ts200; }));
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 2. Delayed zero dispatched before incoming=400 preserves that arrival.
+    script("client.counts", R"([{"__delay":0.15,"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1800000000.000300","last_read":"1800000000.000200",
+                "dm_count":0,"has_unreads":false}],"mpims":[]}])");
+    e.be->pollUnreadCountsForTest();
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 2; }));
+    set(R"({"conversations.history":{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1800000000.000400","user":"UMIRA","text":"newer incoming"}]}})");
+    e.be->setActiveConversation(d1, 0);
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(d1, ts400) != nullptr; }));
+    e.be->setActiveConversation(kNoConv, 0);
+    fakeslack::pumpFor(200);
+    CHECK(e.store.conversation(d1).unread >= 1);
+
+    // 3. Duplicate 450 counts once; own send at 500 creates no arrival evidence.
+    const Ts ts450 = model::parseTs("1800000000.000450");
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts400;
+        c.latest   = ts450;
+        c.unread   = 0;
+        c.mentions = 0;
+    });
+    const auto ctxBeforeDup = e.be->captureReadDispatchForTest();
+    e.be->recordUnreadArrivalForTest(d1, ts450, 1, 1);
+    e.be->recordUnreadArrivalForTest(d1, ts450, 1, 1); // duplicate counts once
+    slack::readstate::Observation zeroAt400;
+    zeroAt400.source           = slack::readstate::Source::ConversationInfo;
+    zeroAt400.lastRead         = ts400;
+    zeroAt400.latest           = ts450;
+    zeroAt400.display.unread   = {0, true};
+    zeroAt400.display.mentions = {0, true};
+    e.be->applyReadObservationForTest(d1, zeroAt400, ctxBeforeDup);
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    // Clear with own=500 (no arrival recorded for own send).
+    const Ts ts500 = model::parseTs("1800000000.000500");
+    e.be->markRead(d1, ts450);
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.mark") >= 1; }));
+    const auto ctxOwn = e.be->captureReadDispatchForTest();
+    model::Message own500;
+    own500.ts   = ts500;
+    own500.user = e.store.me;
+    own500.text = "my newer message";
+    e.store.addMessage(d1, std::move(own500));
+    zeroAt400.lastRead = ts450;
+    zeroAt400.latest   = ts500;
+    e.be->applyReadObservationForTest(d1, zeroAt400, ctxOwn);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 4. Missing unread with mention zero must not clear a known backlog of 5.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.unread   = 5;
+        c.mentions = 2;
+    });
+    slack::readstate::Observation missingUnreadMentionZero;
+    missingUnreadMentionZero.source           = slack::readstate::Source::ConversationInfo;
+    missingUnreadMentionZero.lastRead         = ts450;
+    missingUnreadMentionZero.latest           = ts500;
+    missingUnreadMentionZero.display.mentions = {0, true};
+    e.be->applyReadObservationForTest(d1, missingUnreadMentionZero, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 5);
+    CHECK(e.store.conversation(d1).mentions == 0);
+
+    // 5. Synchronous-observer Read on arrival leaves no stale evidence.
+    const Ts ts600 = model::parseTs("1800000000.000600");
+    e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Append)
+            e.be->markRead(d1, ts600);
+    });
+    const auto ctxPreSync = e.be->captureReadDispatchForTest();
+    set(R"({"conversations.history":{"ok":true,"has_more":false,"messages":[
+        {"ts":"1800000000.000600","user":"UMIRA","text":"sync read arrival"}]}})");
+    e.be->setActiveConversation(d1, 0);
+    REQUIRE(pumpUntil([&] { return e.store.findMessage(d1, ts600) != nullptr; }));
+    e.be->setActiveConversation(kNoConv, 0);
+    zeroAt400.lastRead = ts500;
+    zeroAt400.latest   = ts500;
+    e.be->applyReadObservationForTest(d1, zeroAt400, ctxPreSync);
+    CHECK(e.store.conversation(d1).unread == 0);
+}
+
+TEST("dm zero polling: exact count decreases, disjoint arrivals, overlap, and lower-bound") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    const Ts ts300 = model::parseTs("1800000000.000300");
+    const Ts ts400 = model::parseTs("1800000000.000400");
+    const Ts ts500 = model::parseTs("1800000000.000500");
+
+    // Start with exact unread=5, mentions=3, lastRead=200, latest=400.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = ts200;
+        c.latest   = ts400;
+        c.unread   = 5;
+        c.mentions = 3;
+    });
+
+    // Exact count decreases from 5 to 2 (and mentions 3 to 1) at newer cursor 300 while latest=400.
+    slack::readstate::Observation obs;
+    obs.source           = slack::readstate::Source::ConversationInfo;
+    obs.lastRead         = ts300;
+    obs.latest           = ts400;
+    obs.display.unread   = {2, true};
+    obs.display.mentions = {1, true};
+    e.be->applyReadObservationForTest(d1, obs, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 2);
+    CHECK(e.store.conversation(d1).mentions == 1);
+
+    // Lower-bound-only observation of 1 cannot shrink a known exact total of 5.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.unread   = 5;
+        c.mentions = 2;
+    });
+    slack::readstate::Observation lowerBound;
+    lowerBound.source     = slack::readstate::Source::Counts;
+    lowerBound.lastRead   = ts300;
+    lowerBound.latest     = ts400;
+    lowerBound.hasUnreads = true;
+    e.be->applyReadObservationForTest(d1, lowerBound, e.be->captureReadDispatchForTest());
+    CHECK(e.store.conversation(d1).unread == 5);
+
+    // With one definitely disjoint newer arrival (ts500 > obs.latest=400), 2 + 1 = 3.
+    const auto ctxDisjoint = e.be->captureReadDispatchForTest();
+    e.be->recordUnreadArrivalForTest(d1, ts500, 1, 0);
+    obs.display.mentions = {0, true};
+    e.be->applyReadObservationForTest(d1, obs, ctxDisjoint);
+    CHECK(e.store.conversation(d1).unread == 3);
+    CHECK(e.store.conversation(d1).mentions == 0); // unread and mention totals checked independently
+
+    // With overlap unresolved (post-dispatch arrival at ts350 <= obs.latest=400), do not double-count.
+    const ConvRef d2 = e.conv("D2");
+    REQUIRE(d2 != kNoConv);
+    e.store.updateConversation(d2, [&](model::Conversation &c) {
+        c.lastRead = ts200;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 0;
+    });
+    const Ts ts350 = model::parseTs("1800000000.000350");
+    const auto ctxOverlap = e.be->captureReadDispatchForTest();
+    e.be->recordUnreadArrivalForTest(d2, ts350, 1, 0);
+    set(R"({"conversations.info":{"ok":true,"channel":{"id":"D2","is_im":true,"user":"UEXT",
+        "last_read":"1800000000.000300","latest":{"ts":"1800000000.000400"},
+        "unread_count":2,"unread_count_display":2,"mention_count":0,"mention_count_display":0}}})");
+    const int infoBefore = Log().count("conversations.info");
+    e.be->applyReadObservationForTest(d2, obs, ctxOverlap);
+    CHECK(e.store.conversation(d2).unread == 2); // max(2, 1), not 2 + 1
+    REQUIRE(pumpUntil([&] { return Log().count("conversations.info") > infoBefore; }));
+}
+
+TEST("dm zero polling: 429 queue, transport retry, joined calls, overflow 257, and destruction") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    // 1. Request waits behind a 429; local markUnread happens while queued -> dispatch context
+    // is captured at actual retry dispatch after the cooldown.
+    script("conversations.info",
+           R"([{"ok":false,"error":"ratelimited","retry_after":1},
+               {"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+                "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+                "unread_count":0,"unread_count_display":0}}])");
+    slack::readstate::DispatchContext ctx429{};
+    bool                              done429 = false;
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1",
+        [&](const json::Document &, const std::string &err, const slack::readstate::DispatchContext &ctx) {
+            CHECK(err.empty());
+            ctx429  = ctx;
+            done429 = true;
+        }
+    );
+    const Ts ts200 = model::parseTs("1800000000.000200");
+    e.be->markUnread(d1, ts200);
+    const auto ctxAfterMark = e.be->captureReadDispatchForTest();
+    REQUIRE(pumpUntil([&] { return done429; }, 4000));
+    CHECK(ctx429.readEpoch >= ctxAfterMark.readEpoch);
+
+    // 2. Transport retry (500 then 200) with a new incoming arrival before retry dispatch.
+    script("conversations.info",
+           R"([{"__status":500,"ok":false,"error":"internal_error"},
+               {"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+                "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+                "unread_count":0,"unread_count_display":0}}])");
+    slack::readstate::DispatchContext ctxRetry{};
+    bool                              doneRetry = false;
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1",
+        [&](const json::Document &, const std::string &err, const slack::readstate::DispatchContext &ctx) {
+            CHECK(err.empty());
+            ctxRetry  = ctx;
+            doneRetry = true;
+        }
+    );
+    e.be->recordUnreadArrivalForTest(d1, model::parseTs("1800000000.000350"), 1, 0);
+    const auto ctxAfterArrival = e.be->captureReadDispatchForTest();
+    REQUIRE(pumpUntil([&] { return doneRetry; }, 4000));
+    CHECK(ctxRetry.arrivalEpoch >= ctxAfterArrival.arrivalEpoch);
+
+    // 3. Joined Background calls share the exact same DispatchContext.
+    // Issue one background call first so pacedBusy is true and the next two sit in `paced` and join.
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1&prime=1",
+        [](const json::Document &, const std::string &, const slack::readstate::DispatchContext &) {},
+        /*background=*/true
+    );
+    slack::readstate::DispatchContext joinA{}, joinB{};
+    int                               joinedCount = 0;
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1&join=1",
+        [&](const json::Document &, const std::string &, const slack::readstate::DispatchContext &ctx) {
+            joinA = ctx;
+            ++joinedCount;
+        },
+        /*background=*/true
+    );
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1&join=1",
+        [&](const json::Document &, const std::string &, const slack::readstate::DispatchContext &ctx) {
+            joinB = ctx;
+            ++joinedCount;
+        },
+        /*background=*/true
+    );
+    REQUIRE(pumpUntil([&] { return joinedCount == 2; }, 4000));
+    CHECK(joinA.dispatchId == joinB.dispatchId);
+
+    // 4. Overflow at entry 257 retains unread state and recovers on a clean post-invalidation snapshot.
+    e.be->markRead(d1, model::parseTs("1800000000.000350"));
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.unread   = 3;
+        c.mentions = 1;
+    });
+    const auto preOverflowCtx = e.be->captureReadDispatchForTest();
+    set(R"({"conversations.info":{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1800000000.002000","latest":{"ts":"1800000000.002000"},
+        "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}})");
+    for (int i = 1; i <= 257; ++i) {
+        const Ts ts = model::parseTs("1800000000.001000") + i;
+        e.be->recordUnreadArrivalForTest(d1, ts, 1, 0);
+    }
+    slack::readstate::Observation zeroObs;
+    zeroObs.source           = slack::readstate::Source::ConversationInfo;
+    zeroObs.lastRead         = model::parseTs("1800000000.000350");
+    zeroObs.latest           = model::parseTs("1800000000.000400");
+    zeroObs.display.unread   = {0, true};
+    zeroObs.display.mentions = {0, true};
+    e.be->applyReadObservationForTest(d1, zeroObs, preOverflowCtx);
+    CHECK(e.store.conversation(d1).unread == 3);
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }, 4000));
+
+    // 5. Destroy backend during delayed response: no callback touches freed state.
+    bool destroyedCallbackRan = false;
+    script("conversations.info", R"([{"__delay":0.15,"ok":true,"channel":{"id":"D1"}}])");
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1&destroy=1",
+        [&](const json::Document &, const std::string &, const slack::readstate::DispatchContext &) {
+            destroyedCallbackRan = true;
+        }
+    );
+    e.be.reset();
+    fakeslack::pumpFor(200);
+    CHECK(!destroyedCallbackRan);
 }
 
 #endif // !_WIN32

@@ -24,9 +24,11 @@
 
 #include "app/model/backend.h"
 #include "app/slack/credentials.h"
+#include "app/slack/slack_read_state.h"
 #include "app/slack/web_api.h"
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -243,6 +245,27 @@ public:
         readCall(std::move(method), std::move(form), std::move(done), background);
     }
     void pollUnreadCountsForTest();
+    readstate::DispatchContext captureReadDispatchForTest() { return captureReadDispatch(); }
+    void recordUnreadArrivalForTest(
+        model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions
+    ) {
+        recordUnreadArrival(c, ts, unread, mentions);
+    }
+    void applyReadObservationForTest(
+        model::ConvRef                  c,
+        const readstate::Observation     &obs,
+        const readstate::DispatchContext &context,
+        bool                              allowBackwardCursor = false
+    ) {
+        applyReadObservation(c, obs, context, allowBackwardCursor);
+    }
+    void readCallObservedForTest(
+        std::string method,
+        std::string form,
+        std::function<void(const json::Document &, const std::string &, const readstate::DispatchContext &)>
+             done,
+        bool background = false
+    );
 
     // ── Shared by both halves ───────────────────────────────────────────────
     // A Web API call with this workspace's auth; tracked so the destructor
@@ -325,6 +348,29 @@ private:
     std::vector<std::string> directConversationIds() const;
     void sweepInfo(const std::string &id, std::function<void(model::Conversation *info)> done);
     // Per-conversation local read/unread intent & generation reconciliation.
+    readstate::DispatchContext captureReadDispatch();
+    void recordUnreadArrival(model::ConvRef c, model::Ts ts, uint32_t unread, uint32_t mentions);
+    void retireReadEvidence(const std::string &channel, model::Ts through);
+    void applyReadObservation(
+        model::ConvRef                    c,
+        const readstate::Observation     &obs,
+        const readstate::DispatchContext &context,
+        bool                              allowBackwardCursor = false
+    );
+    readstate::ReadDecision prepareReadObservation(
+        model::ConvRef                    c,
+        const model::Conversation        &candidate,
+        const readstate::Observation     &obs,
+        const readstate::DispatchContext &context,
+        bool                              allowBackwardCursor = false
+    ) const;
+    bool commitReadDecision(
+        model::ConvRef                    c,
+        const readstate::ReadDecision    &decision,
+        const readstate::DispatchContext &context
+    );
+    void     queueReadReconcile(const std::string &channel);
+    void     pumpReadReconcile();
     uint64_t noteLocalMark(const std::string &channel, model::Ts desired);
     void     onMarkQueueDrained(const std::string &channel, uint64_t gen, bool ok);
     void     applyMarkedEvent(
@@ -424,16 +470,25 @@ private:
     bool                               _messagesListUnavailable = false;
     void                               fillActivity(ActivityFeed page, ActivityDone done);
     struct ReadIntent {
-        uint64_t  gen               = 0;
-        uint64_t  epoch             = 0;
-        model::Ts desired           = 0;
-        bool      pending           = false;
-        bool      awaitingEcho      = false;
-        bool      reconcileInFlight = false;
-        bool      reconcileQueued   = false;
+        uint64_t                        gen               = 0;
+        uint64_t                        epoch             = 0;
+        model::Ts                       desired           = 0;
+        bool                            pending           = false;
+        bool                            awaitingEcho      = false;
+        bool                            reconcileInFlight = false;
+        bool                            reconcileQueued   = false;
+        uint64_t                        acceptedObsEpoch  = 0;
+        uint64_t                        acceptedDispatchId = 0;
+        uint64_t                        invalidatedEpoch  = 0;
+        std::vector<readstate::Arrival> arrivals;
     };
     std::unordered_map<std::string, ReadIntent> _readIntent;
-    uint64_t                                    _readEpoch = 0;
+    uint64_t                                    _readEpoch        = 0;
+    uint64_t                                    _nextDispatchId   = 0;
+    uint64_t                                    _arrivalEpoch     = 0;
+    uint64_t                                    _observationEpoch = 0;
+    std::deque<std::string>                     _reconcileQueue;
+    bool                                        _reconcileActive  = false;
 
     std::shared_ptr<bool>              _alive;
     Read                              *_read  = nullptr;

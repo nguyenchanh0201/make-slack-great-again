@@ -148,16 +148,19 @@ struct SlackBackend::Read {
     // method's queue. Write: a Normal-lane write safe to repeat (readCall's
     // writes), never merged with another call.
     enum class Lane : uint8_t { Normal, Background, Urgent, Write };
+    using ObservedDone = std::function<
+        void(const json::Document &, const std::string &, const readstate::DispatchContext &)>;
     struct Call {
-        std::string method, form;
-        ApiDone     done;
-        int         attempt = 0;
-        Lane        lane    = Lane::Normal;
-        bool        quiet   = false; // a 429 waits without the banner
-        int         normals = 0;     // Normal-lane callers this call answers
-        uint64_t    seq           = 0;     // call order: 429 retries keep it
-        uint64_t    dispatchEpoch = 0;     // _readEpoch at actual HTTP dispatch
-        bool        retry         = false; // held after its own 429 (heads the queue)
+        std::string                method, form;
+        ObservedDone               done;
+        int                        attempt = 0;
+        Lane                       lane    = Lane::Normal;
+        bool                       quiet   = false; // a 429 waits without the banner
+        int                        normals = 0;     // Normal-lane callers this call answers
+        uint64_t                   seq           = 0;     // call order: 429 retries keep it
+        uint64_t                   dispatchEpoch = 0;     // _readEpoch at actual HTTP dispatch
+        readstate::DispatchContext dispatchContext;
+        bool                       retry         = false; // held after its own 429 (heads the queue)
     };
     uint64_t                                                   nextSeq           = 0;
     uint64_t                                                   lastDispatchEpoch = 0;
@@ -189,6 +192,13 @@ struct SlackBackend::Read {
         ApiDone     done,
         Lane        lane  = Lane::Normal,
         bool        quiet = false
+    );
+    void callObserved(
+        std::string  method,
+        std::string  form,
+        ObservedDone done,
+        Lane         lane  = Lane::Normal,
+        bool         quiet = false
     );
     void        issue(Call c);
     void        send(Call c);
@@ -382,7 +392,11 @@ struct SlackBackend::Read {
     void tick();
     void pollUnreadCounts();
     // fromCounts: a client.counts snapshot (else the roster's own numbers).
-    void applyActivity(const std::vector<mapjson::Counts> &snapshot, bool fromCounts);
+    void applyActivity(
+        const std::vector<mapjson::Counts> &snapshot,
+        bool                                fromCounts,
+        const readstate::DispatchContext   &context = {}
+    );
     void pollConversation(ConvRef c, bool foreground, Ts hint = 0);
     void pollThreadReplies();
     void pollThreadSubs();
@@ -470,6 +484,19 @@ void SlackBackend::Read::later(int64_t ms, std::function<void()> fn) {
 
 void SlackBackend::Read::call(
     std::string method, std::string form, ApiDone done, Lane lane, bool quiet
+) {
+    ObservedDone wrapped;
+    if (done)
+        wrapped = [done = std::move(done)](
+                      const json::Document &doc,
+                      const std::string    &err,
+                      const readstate::DispatchContext &
+                  ) { done(doc, err); };
+    callObserved(std::move(method), std::move(form), std::move(wrapped), lane, quiet);
+}
+
+void SlackBackend::Read::callObserved(
+    std::string method, std::string form, ObservedDone done, Lane lane, bool quiet
 ) {
     Call c{std::move(method), std::move(form), std::move(done), 0, lane, quiet};
     c.normals = lane != Lane::Background;
@@ -569,10 +596,13 @@ void SlackBackend::Read::join(Call &queued, Call c) {
         queued.done = std::move(c.done);
         return;
     }
-    queued.done = [a = std::move(queued.done),
-                   b = std::move(c.done)](const json::Document &doc, const std::string &err) {
-        a(doc, err);
-        b(doc, err);
+    queued.done = [a = std::move(queued.done), b = std::move(c.done)](
+                      const json::Document             &doc,
+                      const std::string                &err,
+                      const readstate::DispatchContext &ctx
+                  ) {
+        a(doc, err, ctx);
+        b(doc, err, ctx);
     };
 }
 
@@ -597,7 +627,9 @@ void SlackBackend::Read::release(const std::string &method) {
 void SlackBackend::Read::send(Call c) {
     const std::string method = c.method, form = c.form;
     const bool        quiet = c.quiet;
-    c.dispatchEpoch         = b._readEpoch;
+    // Invariant: captureReadDispatch runs at actual API dispatch (and each retry), never at queue time.
+    c.dispatchContext       = b.captureReadDispatch();
+    c.dispatchEpoch         = c.dispatchContext.readEpoch;
     b.issueApi(
         method,
         form,
@@ -624,9 +656,10 @@ void SlackBackend::Read::send(Call c) {
             }
             const bool holds = c.normals > 0 && (normalPending -= c.normals) == 0;
             const auto alive = b._alive; // `done` may end the backend
-            lastDispatchEpoch = c.dispatchEpoch;
+            lastDispatchEpoch = c.dispatchContext.readEpoch;
+            const auto ctx    = c.dispatchContext;
             if (c.done)
-                c.done(doc, err);
+                c.done(doc, err, ctx);
             if (holds && *alive)
                 pumpPaced();
         },
@@ -2709,43 +2742,51 @@ ConvRef SlackBackend::Read::nextBackgroundTarget() {
 void SlackBackend::Read::pollUnreadCounts() {
     if (countsDisabled || countsUnavailable)
         return;
-    call("client.counts", {}, [this](const json::Document &doc, const std::string &err) {
-        if (err.empty()) {
-            countsFailures = 0;
-            applyActivity(mapjson::toCounts(doc.root()), true);
-            // The Activity entry: the feed's unread items (activity_v2).
-            if (session)
-                s.setUnreadActivity(mapjson::activityUnread(doc.root()));
-            // A followed thread has unread replies: maybe a watched one.
-            const bool unread = doc.root()["threads"]["has_unreads"].boolean();
-            if (unread && !threadsUnread)
-                for (Watch &w : watches)
-                    if (w.due)
-                        w.due = std::min(w.due, now());
-            threadsUnread = unread;
-            return;
+    callObserved(
+        "client.counts",
+        {},
+        [this](
+            const json::Document &doc, const std::string &err, const readstate::DispatchContext &ctx
+        ) {
+            if (err.empty()) {
+                countsFailures = 0;
+                applyActivity(mapjson::toCounts(doc.root()), true, ctx);
+                // The Activity entry: the feed's unread items (activity_v2).
+                if (session)
+                    s.setUnreadActivity(mapjson::activityUnread(doc.root()));
+                // A followed thread has unread replies: maybe a watched one.
+                const bool unread = doc.root()["threads"]["has_unreads"].boolean();
+                if (unread && !threadsUnread)
+                    for (Watch &w : watches)
+                        if (w.due)
+                            w.due = std::min(w.due, now());
+                threadsUnread = unread;
+                return;
+            }
+            if (isMethodUnavailable(err))
+                countsUnavailable = true;
+            // A blip must not cost the mechanism; a few failures in a row do.
+            if (countsUnavailable || ++countsFailures >= kCountsFailureLimit) {
+                LOG_WARN(
+                    "slack",
+                    "client.counts unavailable (%s): falling back to the roster diff",
+                    err.c_str()
+                );
+                countsDisabled = true;
+                activity.clear();
+                activityPrimed = false;
+            }
         }
-        if (isMethodUnavailable(err))
-            countsUnavailable = true;
-        // A blip must not cost the mechanism; a few failures in a row do.
-        if (countsUnavailable || ++countsFailures >= kCountsFailureLimit) {
-            LOG_WARN(
-                "slack",
-                "client.counts unavailable (%s): falling back to the roster diff",
-                err.c_str()
-            );
-            countsDisabled = true;
-            activity.clear();
-            activityPrimed = false;
-        }
-    });
+    );
 }
 
 // An activity snapshot: fold the cursors in (upward only), seed the
 // badges of conversations seen for the first time, and poll the ones that
 // moved since the previous snapshot.
 void SlackBackend::Read::applyActivity(
-    const std::vector<mapjson::Counts> &snapshot, bool fromCounts
+    const std::vector<mapjson::Counts> &snapshot,
+    bool                                fromCounts,
+    const readstate::DispatchContext   &context
 ) {
     if (snapshot.empty())
         return;
@@ -2782,7 +2823,12 @@ void SlackBackend::Read::applyActivity(
         const auto    it        = activity.find(c.id);
         const bool    firstSeen = priming || it == activity.end();
         const ConvRef r         = s.findConversation(c.id);
-        if (r != kNoConv && b.snapshotAllowed(c.id, lastDispatchEpoch)) {
+        if (r != kNoConv && fromCounts) {
+            const model::Conversation &x = s.conversation(r);
+            if ((x.member && r != openConv) || c.read.hasUnreads == false ||
+                c.read.display.unread.value == 0)
+                b.applyReadObservation(r, c.read, context);
+        } else if (r != kNoConv && b.snapshotAllowed(c.id, lastDispatchEpoch)) {
             const model::Conversation &x = s.conversation(r);
             Ts                         newLastRead = 0, newLatest = 0;
             uint32_t                   unread = 0, mentions = 0;
@@ -3624,6 +3670,22 @@ bool SlackBackend::Read::inject(ConvRef c, model::Message m, bool parentIsMe) {
     const Ts                   lastRead = cv.lastRead;
     bool                       counted  = !own && cv.member && ts > lastRead;
     const bool                 isDm = cv.isDirect(), muted = cv.muted;
+    const bool                 threadMuted = root && s.threadMuted(c, root);
+    const bool                 isFollowed  = !threadMuted && root && (parentIsMe || followed.count(key));
+
+    uint32_t du = 0, dm = 0;
+    if (counted) {
+        if (root && !mention && !isFollowed && (threadMuted || !isDm)) {
+            // lives in the thread, not the channel
+        } else if (!muted) {
+            du = 1;
+            dm = isDm || mention || isFollowed;
+        } else if (!isDm && (mention || isFollowed)) {
+            du = dm = 1;
+        }
+    }
+    if (du > 0 || dm > 0)
+        b.recordUnreadArrival(c, ts, du, dm);
 
     if (root && !s.replies(c, root)) {
         // The thread isn't loaded: count the reply on its root only (the
@@ -3643,30 +3705,21 @@ bool SlackBackend::Read::inject(ConvRef c, model::Message m, bool parentIsMe) {
         // lands (the shell's observer, inside addMessage). The Store has
         // recounted; count on top of that, and not this message.
         if (const model::Conversation &x = s.conversation(c); x.lastRead != lastRead) {
+            b.retireReadEvidence(x.id, x.lastRead);
             unread0   = x.unread;
             mentions0 = x.mentions;
             counted   = counted && ts > x.lastRead;
+            if (!counted) {
+                du = 0;
+                dm = 0;
+            }
         }
     }
 
     // A reply in a thread I follow, or one that
     // mentions me, makes the Threads entry unread.
-    if (!own && root && !s.threadMuted(c, root) && (parentIsMe || followed.count(key) || mention))
+    if (!own && root && !threadMuted && (parentIsMe || followed.count(key) || mention))
         noteUnreadThreadReply(c, root, ts);
-
-    uint32_t du = 0, dm = 0;
-    if (counted) {
-        const bool threadMuted = root && s.threadMuted(c, root);
-        const bool isFollowed  = !threadMuted && root && (parentIsMe || followed.count(key));
-        if (root && !mention && !isFollowed && (threadMuted || !isDm)) {
-            // lives in the thread, not the channel
-        } else if (!muted) {
-            du = 1;
-            dm = isDm || mention || isFollowed;
-        } else if (!isDm && (mention || isFollowed)) {
-            du = dm = 1;
-        }
-    }
     const model::Conversation &now = s.conversation(c);
     if (now.unread != unread0 + du || now.mentions != mentions0 + dm || now.latest < ts)
         s.updateConversation(c, [&](model::Conversation &x) {
@@ -3873,45 +3926,371 @@ void SlackBackend::applyAuthoritativeReadObservation(
     }
 }
 
-void SlackBackend::reconcileConversationReadState(const std::string &channel) {
+readstate::DispatchContext SlackBackend::captureReadDispatch() {
+    return {++_nextDispatchId, _readEpoch, _arrivalEpoch, _observationEpoch};
+}
+
+void SlackBackend::recordUnreadArrival(
+    ConvRef c, Ts ts, uint32_t unread, uint32_t mentions
+) {
+    if (c >= _store.conversationCount() || ts <= 0 || (unread == 0 && mentions == 0))
+        return;
+    const std::string &channel = _store.conversation(c).id;
+    if (channel.empty())
+        return;
+    ReadIntent &in = _readIntent[channel];
+    for (const readstate::Arrival &a : in.arrivals)
+        if (a.ts == ts)
+            return; // duplicate delivery counts once
+    const uint64_t seq = ++_arrivalEpoch;
+    static constexpr size_t kMaxArrivalsPerConv = 256;
+    if (in.arrivals.size() >= kMaxArrivalsPerConv || in.invalidatedEpoch > 0) {
+        in.invalidatedEpoch = seq;
+        queueReadReconcile(channel);
+        return;
+    }
+    in.arrivals.push_back({ts, seq, unread, mentions});
+}
+
+void SlackBackend::retireReadEvidence(const std::string &channel, Ts through) {
+    if (channel.empty() || through <= 0)
+        return;
+    const auto it = _readIntent.find(channel);
+    if (it == _readIntent.end())
+        return;
+    auto &arrivals = it->second.arrivals;
+    arrivals.erase(
+        std::remove_if(
+            arrivals.begin(),
+            arrivals.end(),
+            [through](const readstate::Arrival &a) { return a.ts <= through; }
+        ),
+        arrivals.end()
+    );
+}
+
+// Invariant: prepareReadObservation never mutates or emits; commitReadDecision
+// revalidates freshness and advances bookkeeping before any Store publication.
+readstate::ReadDecision SlackBackend::prepareReadObservation(
+    ConvRef                           c,
+    const model::Conversation        &candidate,
+    const readstate::Observation     &obs,
+    const readstate::DispatchContext &context,
+    bool                              allowBackwardCursor
+) const {
+    readstate::ReadDecision out{
+        candidate.lastRead, candidate.latest, candidate.unread, candidate.mentions, false, false, ""
+    };
+    if (c >= _store.conversationCount()) {
+        out.reason = "invalid-conv";
+        return out;
+    }
+    const ReadIntent *in = nullptr;
+    if (const auto it = _readIntent.find(candidate.id); it != _readIntent.end())
+        in = &it->second;
+
+    if (in) {
+        if (in->pending || context.readEpoch < in->epoch) {
+            out.reason = "stale-intent";
+            return out;
+        }
+        if (context.dispatchId < in->acceptedDispatchId ||
+            (context.dispatchId == 0 && context.observationEpoch < in->acceptedObsEpoch)) {
+            out.refresh = false;
+            out.reason  = "superseded-observation";
+            return out;
+        }
+        if (in->invalidatedEpoch > 0) {
+            const bool newerArrival = std::any_of(
+                in->arrivals.begin(),
+                in->arrivals.end(),
+                [&](const readstate::Arrival &a) { return a.sequence > context.arrivalEpoch; }
+            );
+            if (context.arrivalEpoch < in->invalidatedEpoch || newerArrival) {
+                out.refresh = true;
+                out.reason  = "evidence-overflow";
+                return out;
+            }
+        }
+    }
+
+    const Ts newLastRead = allowBackwardCursor && obs.lastRead
+                               ? *obs.lastRead
+                               : std::max(candidate.lastRead, obs.lastRead.value_or(0));
+    const Ts newLatest   = std::max(candidate.latest, obs.latest.value_or(0));
+
+    std::optional<uint32_t> exactUnread;
+    std::optional<uint32_t> lowerBoundUnread;
+    if (obs.display.unread.value.has_value() && obs.display.unread.exact) {
+        exactUnread = *obs.display.unread.value;
+    } else if (
+        obs.source != readstate::Source::Reconcile &&
+        obs.source != readstate::Source::Marked &&
+        obs.source != readstate::Source::Counts &&
+        obs.raw.unread.value.has_value() && obs.raw.unread.exact
+    ) {
+        exactUnread = *obs.raw.unread.value;
+    }
+    if (!exactUnread.has_value() && obs.hasUnreads.has_value()) {
+        if (!*obs.hasUnreads)
+            exactUnread = 0;
+        else
+            lowerBoundUnread = 1;
+    }
+    if (obs.source == readstate::Source::Counts && !exactUnread.has_value() &&
+        obs.raw.unread.value.has_value() && *obs.raw.unread.value > 0) {
+        lowerBoundUnread = std::max(lowerBoundUnread.value_or(0), *obs.raw.unread.value);
+    }
+
+    std::optional<uint32_t> exactMentions;
+    if (obs.display.mentions.value.has_value() && obs.display.mentions.exact) {
+        exactMentions = *obs.display.mentions.value;
+    } else if (
+        obs.source != readstate::Source::Reconcile &&
+        obs.source != readstate::Source::Marked &&
+        obs.raw.mentions.value.has_value() && obs.raw.mentions.exact
+    ) {
+        exactMentions = *obs.raw.mentions.value;
+    }
+
+    uint32_t disjointUnread = 0, overlapUnread = 0;
+    uint32_t disjointMentions = 0, overlapMentions = 0;
+    if (in) {
+        for (const readstate::Arrival &a : in->arrivals) {
+            if (a.ts <= newLastRead)
+                continue;
+            const bool postDispatch = a.sequence > context.arrivalEpoch;
+            const bool afterObsLatest = !obs.latest.has_value() || a.ts > *obs.latest;
+            if (afterObsLatest) {
+                disjointUnread += a.unread;
+                disjointMentions += a.mentions;
+            } else if (postDispatch) {
+                overlapUnread += a.unread;
+                overlapMentions += a.mentions;
+            }
+        }
+    }
+
+    uint32_t newUnread   = candidate.unread;
+    uint32_t newMentions = candidate.mentions;
+    bool     needsRefresh = false;
+
+    if (newLatest <= newLastRead && disjointUnread == 0 && overlapUnread == 0 &&
+        disjointMentions == 0 && overlapMentions == 0) {
+        newUnread   = 0;
+        newMentions = 0;
+    } else {
+        if (exactUnread.has_value()) {
+            if (*exactUnread == 0) {
+                newUnread = disjointUnread + overlapUnread;
+                if (overlapUnread > 0)
+                    needsRefresh = true;
+            } else {
+                newUnread = std::max(*exactUnread, overlapUnread) + disjointUnread;
+                if (overlapUnread > 0)
+                    needsRefresh = true;
+            }
+        } else if (lowerBoundUnread.has_value()) {
+            newUnread = std::max({candidate.unread, *lowerBoundUnread, disjointUnread + overlapUnread});
+        } else {
+            newUnread = candidate.unread + disjointUnread;
+        }
+
+        if (exactMentions.has_value()) {
+            if (*exactMentions == 0) {
+                newMentions = disjointMentions + overlapMentions;
+                if (overlapMentions > 0)
+                    needsRefresh = true;
+            } else {
+                newMentions = std::max(*exactMentions, overlapMentions) + disjointMentions;
+                if (overlapMentions > 0)
+                    needsRefresh = true;
+            }
+        } else if (exactUnread.has_value() && *exactUnread == 0 && disjointUnread == 0 &&
+                   overlapUnread == 0) {
+            newMentions = 0;
+        } else if (candidate.isDirect() && obs.source == readstate::Source::Counts &&
+                   lowerBoundUnread.has_value()) {
+            newMentions = std::max(candidate.mentions, *lowerBoundUnread) + disjointMentions;
+        } else {
+            newMentions = candidate.mentions + disjointMentions;
+        }
+
+        const bool muted = candidate.muted || candidate.notify == model::NotifyLevel::Nothing;
+        if (muted && !candidate.isDirect())
+            newUnread = newMentions;
+    }
+
+    out.lastRead = newLastRead;
+    out.latest   = newLatest;
+    out.unread   = newUnread;
+    out.mentions = newMentions;
+    out.accept   = true;
+    out.refresh  = needsRefresh;
+    out.reason   = needsRefresh ? "accept-refresh" : "accept";
+    return out;
+}
+
+bool SlackBackend::commitReadDecision(
+    ConvRef                           c,
+    const readstate::ReadDecision    &decision,
+    const readstate::DispatchContext &context
+) {
+    if (c >= _store.conversationCount())
+        return false;
+    const std::string channel = _store.conversation(c).id;
+    if (channel.empty())
+        return false;
+
+    if (!decision.accept) {
+        if (decision.refresh)
+            queueReadReconcile(channel);
+        return false;
+    }
+
+    ReadIntent &in = _readIntent[channel];
+    if (in.pending || context.readEpoch < in.epoch)
+        return false;
+    if (context.dispatchId < in.acceptedDispatchId ||
+        (context.dispatchId == 0 && context.observationEpoch < in.acceptedObsEpoch))
+        return false;
+    if (in.invalidatedEpoch > 0) {
+        const bool newerArrival = std::any_of(
+            in.arrivals.begin(),
+            in.arrivals.end(),
+            [&](const readstate::Arrival &a) { return a.sequence > context.arrivalEpoch; }
+        );
+        if (context.arrivalEpoch < in.invalidatedEpoch || newerArrival) {
+            queueReadReconcile(channel);
+            return false;
+        }
+        in.invalidatedEpoch = 0;
+    }
+
+    in.acceptedObsEpoch   = ++_observationEpoch;
+    in.acceptedDispatchId = context.dispatchId;
+    // Retire arrivals covered by the accepted read cursor or absorbed by this baseline.
+    in.arrivals.erase(
+        std::remove_if(
+            in.arrivals.begin(),
+            in.arrivals.end(),
+            [&](const readstate::Arrival &a) {
+                return a.ts <= decision.lastRead ||
+                       (a.sequence <= context.arrivalEpoch && a.ts <= decision.latest);
+            }
+        ),
+        in.arrivals.end()
+    );
+    if (decision.refresh)
+        queueReadReconcile(channel);
+    return true;
+}
+
+void SlackBackend::applyReadObservation(
+    ConvRef                           c,
+    const readstate::Observation     &obs,
+    const readstate::DispatchContext &context,
+    bool                              allowBackwardCursor
+) {
+    if (c >= _store.conversationCount())
+        return;
+    const model::Conversation    &cur         = _store.conversation(c);
+    const Ts                      curLastRead = cur.lastRead, curLatest = cur.latest;
+    const uint32_t                curUnread = cur.unread, curMentions = cur.mentions;
+    const readstate::ReadDecision d =
+        prepareReadObservation(c, cur, obs, context, allowBackwardCursor);
+    if (!commitReadDecision(c, d, context))
+        return;
+    if (d.lastRead != curLastRead || d.latest != curLatest || d.unread != curUnread ||
+        d.mentions != curMentions) {
+        _store.updateConversation(c, [&](model::Conversation &x) {
+            x.lastRead = d.lastRead;
+            x.latest   = d.latest;
+            x.unread   = d.unread;
+            x.mentions = d.mentions;
+        });
+    }
+}
+
+void SlackBackend::queueReadReconcile(const std::string &channel) {
     if (channel.empty() || !_read)
         return;
     ReadIntent &in = _readIntent[channel];
-    if (in.reconcileInFlight) {
-        in.reconcileQueued = true;
+    if (in.reconcileQueued)
         return;
-    }
-    in.reconcileInFlight    = true;
-    in.reconcileQueued      = false;
-    const uint64_t capGen   = in.gen;
-    _read->call(
+    in.reconcileQueued = true;
+    if (!in.reconcileInFlight)
+        _reconcileQueue.push_back(channel);
+    pumpReadReconcile();
+}
+
+void SlackBackend::pumpReadReconcile() {
+    if (_reconcileActive || _reconcileQueue.empty() || !_read)
+        return;
+    const std::string channel = std::move(_reconcileQueue.front());
+    _reconcileQueue.pop_front();
+    ReadIntent &in       = _readIntent[channel];
+    in.reconcileQueued   = false;
+    in.reconcileInFlight = true;
+    _reconcileActive     = true;
+    const uint64_t capGen = in.gen;
+    _read->callObserved(
         "conversations.info",
         net::formEncode({{"channel", channel}}),
-        [this, channel, capGen](const json::Document &doc, const std::string &err) {
-            const auto it = _readIntent.find(channel);
-            if (it == _readIntent.end())
+        [this, channel, capGen](
+            const json::Document             &doc,
+            const std::string                &err,
+            const readstate::DispatchContext &ctx
+        ) {
+            _reconcileActive = false;
+            const auto it    = _readIntent.find(channel);
+            if (it == _readIntent.end()) {
+                pumpReadReconcile();
                 return;
+            }
             it->second.reconcileInFlight = false;
             const bool wantAnother       = it->second.reconcileQueued;
-            it->second.reconcileQueued   = false;
-            if (it->second.gen != capGen || it->second.pending) {
-                if (wantAnother)
-                    reconcileConversationReadState(channel);
-                return;
-            }
-            it->second.awaitingEcho = false;
-            if (err.empty()) {
-                const model::Conversation info =
-                    mapjson::toConversation(doc.root()["channel"], _store);
-                if (const ConvRef c = _store.findConversation(channel); c != kNoConv)
-                    applyAuthoritativeReadObservation(
-                        c, info.lastRead, info.latest, info.unread, info.mentions, true
-                    );
-            }
+            it->second.reconcileQueued   = wantAnother;
             if (wantAnother)
-                reconcileConversationReadState(channel);
+                _reconcileQueue.push_back(channel);
+            if (it->second.gen == capGen && !it->second.pending) {
+                if (err.empty()) {
+                    it->second.awaitingEcho = false;
+                    const auto obs = mapjson::conversationReadObservation(
+                        doc.root()["channel"], readstate::Source::Reconcile
+                    );
+                    if (const ConvRef c = _store.findConversation(channel); c != kNoConv)
+                        applyReadObservation(c, obs, ctx, true);
+                } else if (
+                    err != "cancelled" && err != "channel_not_found" && !it->second.reconcileQueued
+                ) {
+                    it->second.reconcileQueued = true;
+                    _reconcileQueue.push_back(channel);
+                }
+            }
+            pumpReadReconcile();
         },
-        Read::Lane::Normal
+        Read::Lane::Background,
+        /*quiet=*/true
+    );
+}
+
+void SlackBackend::reconcileConversationReadState(const std::string &channel) {
+    queueReadReconcile(channel);
+}
+
+void SlackBackend::readCallObservedForTest(
+    std::string method,
+    std::string form,
+    std::function<void(const json::Document &, const std::string &, const readstate::DispatchContext &)>
+         done,
+    bool background
+) {
+    _read->callObserved(
+        std::move(method),
+        std::move(form),
+        std::move(done),
+        background ? Read::Lane::Background : Read::Lane::Normal
     );
 }
 

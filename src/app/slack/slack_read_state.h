@@ -31,4 +31,28 @@ struct Observation {
     Source                   source = Source::ConversationInfo;
 };
 
+struct DispatchContext {
+    uint64_t dispatchId       = 0;
+    uint64_t readEpoch        = 0;
+    uint64_t arrivalEpoch     = 0;
+    uint64_t observationEpoch = 0;
+};
+
+struct Arrival {
+    model::Ts ts       = 0;
+    uint64_t  sequence = 0;
+    uint32_t  unread   = 0;
+    uint32_t  mentions = 0;
+};
+
+struct ReadDecision {
+    model::Ts   lastRead = 0;
+    model::Ts   latest   = 0;
+    uint32_t    unread   = 0;
+    uint32_t    mentions = 0;
+    bool        accept   = false;
+    bool        refresh  = false;
+    const char *reason   = "";
+};
+
 } // namespace slack::readstate
