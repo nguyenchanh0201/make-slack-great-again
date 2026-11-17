@@ -1,0 +1,60 @@
+diff --git a/tests/app/core/test_slack_read.cpp b/tests/app/core/test_slack_read.cpp
+index bbecbdc..d2c772e 100644
+--- a/tests/app/core/test_slack_read.cpp
++++ b/tests/app/core/test_slack_read.cpp
+@@ -1497,4 +1497,14 @@ TEST("slack read: stale snapshots do not restore unread over newer read or erase
+     (void)ts100;
+ }
+ 
++TEST("dm investigation: an explicit zero unread count is not inferred as one") {
++    model::Store store;
++    json::Document doc;
++    REQUIRE(doc.parse(std::string(R"({"id":"D1","is_im":true,"user":"UMIRA",
++        "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
++        "unread_count":0,"unread_count_display":0,"mention_count":0})"), nullptr));
++    const auto c = slack::mapjson::toConversation(doc.root(), store);
++    CHECK(c.unread == 0);
++}
++
+ #endif // !_WIN32
+diff --git a/tests/app/core/test_slack_realtime.cpp b/tests/app/core/test_slack_realtime.cpp
+index 2dbc886..14093e2 100644
+--- a/tests/app/core/test_slack_realtime.cpp
++++ b/tests/app/core/test_slack_realtime.cpp
+@@ -1480,4 +1480,36 @@ TEST("slack realtime: marked events preserve newest local read and mark-unread i
+     REQUIRE(pumpUntil([&] { return count("conversations.mark") == 7; }));
+ }
+ 
++TEST("dm investigation: remote read clears a DM with a newer own message") {
++    if (!haveServer())
++        return;
++    Env e;
++    REQUIRE(e.connect());
++    REQUIRE(e.live());
++    const ConvRef d1 = e.conv("D1");
++    const Ts incoming = model::parseTs("1800000000.000200");
++    const Ts own = model::parseTs("1800000000.000300");
++    model::Message received;
++    received.ts = incoming;
++    received.user = e.store.findUser("UMIRA");
++    received.text = "message read in the other client";
++    e.store.addMessage(d1, std::move(received));
++    model::Message sent;
++    sent.ts = own;
++    sent.user = e.store.me;
++    sent.text = "my newer reply";
++    e.store.addMessage(d1, std::move(sent));
++    e.store.updateConversation(d1, [&](model::Conversation &c) {
++        c.lastRead = incoming - 1;
++        c.latest = own;
++        c.unread = c.mentions = 1;
++    });
++    REQUIRE(push(envelope("remote-read-own-newer",
++        R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
++        "unread_count_display":0,"mention_count_display":0})")));
++    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == incoming; }));
++    CHECK(e.store.conversation(d1).unread == 0);
++    CHECK(e.store.conversation(d1).mentions == 0);
++}
++
+ #endif
