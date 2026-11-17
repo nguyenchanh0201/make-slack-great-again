@@ -1,6 +1,6 @@
 # DM unread zero-count reconciliation
 
-Status: proposed; targeted approach selected by the user, written design awaiting approval.
+Status: approved by the user on 2026-11-17; implementation plan requested.
 
 ## Intent and scope
 
