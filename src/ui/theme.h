@@ -214,20 +214,33 @@ void  resolveSpans(text::AttributedText &t);
 enum class Palette : uint8_t { Purple, Charcoal, Blue, Green, Custom, Count };
 
 // A user-defined palette in Slack's shape: four colours and the switches.
-// Defaults match Slack's Raspberry Beret custom theme.
+// The defaults are neutral (Aubergine, nothing pinned): what a theme that
+// doesn't name a field gets. A fresh install starts on raspberryBeret().
 struct CustomPalette {
-    Color primary         = 0xfff4daff; // the rail
-    Color highlight1      = 0xff9e0b2e; // selection pill and accent
-    Color highlight2      = 0xff83388a; // presence dot
-    Color important       = 0xffc01343; // mention badge
+    Color primary         = 0xff3f0e40; // the rail
+    Color highlight1      = 0xff3f0e40; // selection pill and accent
+    Color highlight2      = 0xff2bac76; // presence dot
+    Color important       = 0xffcd2553; // mention badge
     int   brightness      = 6;          // 0–10, 6 = the rail as designed
     bool  sidebarInverted = true;       // a dark rail over light content
     bool  gradient        = true;       // blend primary and selection hues in navigation chrome
     // Pins a legacy Slack theme string names outright; 0 = derive: menu_bg / hover_item,
     // active_item_text, text_color, top_nav_bg, top_nav_text.
-    Color itemHover = 0xffe8dfea, itemSelText = 0xffffffff, itemText = 0xff5b395e,
-          titleBarBg = 0, titleBarText = 0xff340a38;
+    Color itemHover = 0, itemSelText = 0, itemText = 0, titleBarBg = 0, titleBarText = 0;
 };
+// Slack's Raspberry Beret custom theme, pins included: the default theme.
+inline CustomPalette raspberryBeret() {
+    CustomPalette p;
+    p.primary      = 0xfff4daff;
+    p.highlight1   = 0xff9e0b2e;
+    p.highlight2   = 0xff83388a;
+    p.important    = 0xffc01343;
+    p.itemHover    = 0xffe8dfea;
+    p.itemSelText  = 0xffffffff;
+    p.itemText     = 0xff5b395e;
+    p.titleBarText = 0xff340a38;
+    return p;
+}
 
 // Everything a preview card paints for one palette in one mode.
 struct PaletteColors {
@@ -237,7 +250,7 @@ struct PaletteColors {
     Color gradientEnd; // selection hue lifted for a pale custom window gradient
 };
 
-// The picks; defaults are Purple (light) and Charcoal (dark). Call
+// The picks; both default to Custom (raspberryBeret()). Call
 // App::restyle() afterwards to repaint.
 void                 setPalette(bool dark, Palette p);
 Palette              palette(bool dark);

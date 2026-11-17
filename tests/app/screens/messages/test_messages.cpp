@@ -149,6 +149,25 @@ struct DownloadingBackend : fake::FakeBackend {
     std::vector<Asked>       asked;
     std::vector<std::string> resolved;         // resolveChannel ids
     bool                     reminders = true; // Capabilities::messageReminders
+    // Older pages served one per loadHistory, newest first (empty: the fake's
+    // single page).
+    std::vector<std::vector<model::Message>> older;
+    int                                      historyLoads = 0;
+    void loadHistory(ConvRef conv, Ts before, Done done) override {
+        if (older.empty())
+            return FakeBackend::loadHistory(conv, before, std::move(done));
+        ++historyLoads;
+        app().platform().post([this, conv, done = std::move(done)] {
+            std::vector<model::Message> page = std::move(older.front());
+            older.erase(older.begin());
+            const bool more = !older.empty();
+            _store.addPage(conv, std::move(page));
+            _store.updateConversation(conv, [more](model::Conversation &c) {
+                c.hasMoreBefore = more;
+            });
+            done(true, "");
+        });
+    }
     void         resolveChannel(const std::string &id) override { resolved.push_back(id); }
     Capabilities capabilities() const override {
         Capabilities c     = FakeBackend::capabilities();
@@ -993,6 +1012,40 @@ TEST(
     e.store.addMessage(later, msg(mira, 6000, "arrives later"));
     pump(4);
     CHECK_FALSE(e.list->flashing(6000 * 1000000LL));
+}
+
+TEST("anchoring: jumpTo — a search hit pages back further than one page, and stops once past it") {
+    Env                  e(true);
+    const model::UserRef mira = e.store.findUser("U0MIRA");
+    model::Conversation  c;
+    c.id               = "C0DEEP";
+    c.name             = "deep";
+    c.hasMoreBefore    = true;
+    const ConvRef deep = e.store.addConversation(std::move(c));
+    std::vector<model::Message> head;
+    for (int s = 9000; s <= 9900; s += 100)
+        head.push_back(msg(mira, s, "recent"));
+    e.store.addPage(deep, std::move(head));
+    for (int top : {8000, 7000, 6000, 5000}) {
+        std::vector<model::Message> page;
+        for (int s = top; s < top + 1000; s += 100)
+            if (s != 6550)
+                page.push_back(msg(mira, s, "older"));
+        e.backend.older.push_back(std::move(page));
+    }
+    e.store.updateConversation(deep, [](model::Conversation &x) { x.hasMoreBefore = true; });
+    e.list->showConversation(deep);
+    pump(10);
+    // Three pages back: each page that doesn't bring it asks for the next.
+    e.list->jumpTo(6100 * 1000000LL);
+    REQUIRE(until([&] { return e.list->flashing(6100 * 1000000LL); }));
+    CHECK(e.backend.older.size() == 1); // found: no page past it
+    // A deleted target inside what is loaded: dropped, no further loads.
+    const int loads = e.backend.historyLoads;
+    e.list->jumpTo(6550 * 1000000LL);
+    pump(10);
+    CHECK_FALSE(e.list->flashing(6550 * 1000000LL));
+    CHECK(e.backend.historyLoads == loads);
 }
 
 TEST("actions: a reaction pill toggles mine; the newest message on screen marks read") {
@@ -2400,6 +2453,48 @@ TEST(
     CHECK_FALSE(at("snake").italic);
     CHECK(at("docs").linkId == 1);
     CHECK(at("https://y").linkId == 2);
+}
+
+TEST("rich: a Markdown preview shows its images under their lines, relative ones when local") {
+    Env        e(false);
+    // The text blocks of the open viewer, top to bottom.
+    const auto blocks = [&](ui::Popup *v) {
+        std::vector<std::string>        out;
+        std::function<void(ui::View *)> walk = [&](ui::View *n) {
+            if (n->role() == ui::Role::Text && n->accessibleName().size() > 12)
+                out.push_back(n->accessibleName());
+            for (size_t i = 0; i < n->childCount(); ++i)
+                walk(n->child(i));
+        };
+        walk(v);
+        return out;
+    };
+    const std::string md =
+        "before the picture\n\n![a cat](https://files.img.test/cat.png)\n\nafter it, and "
+        "![inline](https://files.img.test/i.png) stays a link\n```\n![in "
+        "code](https://x.test/c.png)\n"
+        "```\nthen a relative one\n\n![mira](avatars/mira.png)\n\nthe end of the file\n";
+    // A downloaded copy (no folder): the relative image stays text.
+    ui::Popup *v = showMarkdownViewer(*e.win, e.ctx, "pic.md", md, {});
+    pump(4);
+    std::vector<std::string> t = blocks(v);
+    // The lone picture and the inline one split the text; code keeps its own.
+    REQUIRE(t.size() == 3);
+    CHECK(t[0].find("before the picture") != std::string::npos);
+    CHECK(t[1].find("inline stays a link") != std::string::npos);
+    CHECK(t[2].find("![in code](https://x.test/c.png)") != std::string::npos);
+    CHECK(t[2].find("mira") != std::string::npos); // not found: a link in the text
+    v->close();
+    pump(2);
+    // A local file: its relative image is found next to it, and splits too.
+    v = showMarkdownViewer(*e.win, e.ctx, "pic.md", md, {}, MSGA_TEST_ASSETS);
+    pump(4);
+    t = blocks(v);
+    REQUIRE(t.size() == 4);
+    CHECK(t[2].find("mira") == std::string::npos);
+    CHECK(t[3].find("the end of the file") != std::string::npos);
+    v->close();
+    pump(2);
 }
 
 TEST("actions: a file card click downloads (Download tooltip), a Markdown one opens its preview") {
@@ -4160,6 +4255,8 @@ TEST("audio: a remote clip downloads once into the audio cache as a job; one pla
     REQUIRE(until([&] { return audioState(player) == media::AudioPlayer::State::Error; }));
     CHECK_STR(player.status().error, "Download failed");
     file::remove(cached);
+    if (e.backend.asked.size() >= 2) // the second clip's copy too: the next run downloads again
+        file::remove(e.backend.asked[1].to);
 }
 
 TEST("audio: View transcript shows Slack's line; Transcribe with AI replaces it") {

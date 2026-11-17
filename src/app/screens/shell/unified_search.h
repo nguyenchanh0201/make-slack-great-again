@@ -67,7 +67,8 @@ public:
     std::function<void(const std::string &key, model::ConvRef)>            onOpenConv;
     std::function<void(const std::string &key, Sidebar::Nav)>              onOpenPage;
     std::function<void(const std::string &key, model::UserRef)>            onMessageUser;
-    std::function<void(const std::string &key, model::ConvRef, model::Ts)> onOpenMessage;
+    std::function<void(const std::string &key, model::ConvRef, model::Ts ts, model::Ts thread)>
+        onOpenMessage; // thread: non-zero for a reply
 
     static constexpr double kDebounceMs = 300;
 

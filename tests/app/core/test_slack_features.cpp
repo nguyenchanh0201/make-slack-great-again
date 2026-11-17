@@ -812,6 +812,9 @@ TEST("slack features: custom sidebar sections — the list, moves, create, a ref
     const int listed = count("users.channelSections.list");
     e.be->updateSection("L1", "Work", "fire");
     CHECK_STR(e.store.sections()[0].name, "Work"); // at once
+    // The move once the rename is in: the log is in arrival order, which two
+    // calls in flight together don't keep.
+    REQUIRE(pumpUntil([] { return count("users.channelSections.set") == 1; }));
     e.be->moveSection("L2", -1);
     REQUIRE(pumpUntil([] { return count("users.channelSections.set") == 2; }));
     {

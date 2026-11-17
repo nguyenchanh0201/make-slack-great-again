@@ -270,7 +270,12 @@ void fromJson(const json::Value r, Settings &s) {
     s.lastUpdateCheck = r["lastUpdateCheck"].integer();
     s.use24hSaved     = r.has("use24h");
 
-    screens::readCustomTheme(r["customTheme"], &s.custom);
+    // A saved theme from scratch: what it doesn't name stays derived, never
+    // Raspberry Beret's (the default without one).
+    if (r.has("customTheme")) {
+        s.custom = {};
+        screens::readCustomTheme(r["customTheme"], &s.custom);
+    }
 
     for (const json::Value e : r["visitedAt"])
         if (!e.key().empty() && e.integer() > 0)
@@ -278,6 +283,9 @@ void fromJson(const json::Value r, Settings &s) {
     for (const json::Value e : r["closedAt"])
         if (!e.key().empty() && e.integer() > 0)
             s.closedAt.emplace_back(std::string(e.key()), e.integer());
+    for (const json::Value e : r["reopenedAt"])
+        if (!e.key().empty() && e.integer() > 0)
+            s.reopenedAt.emplace_back(std::string(e.key()), e.integer());
     for (const json::Value e : r["sidebarSorts"])
         if (!e["section"].str().empty() && !e["sort"].str().empty())
             s.sidebarSorts.push_back(
@@ -368,6 +376,12 @@ std::string Settings::toFile() const {
     if (!closedAt.empty()) {
         w.key("closedAt").beginObject();
         for (const auto &[id, at] : closedAt)
+            w.key(id).value(at);
+        w.endObject();
+    }
+    if (!reopenedAt.empty()) {
+        w.key("reopenedAt").beginObject();
+        for (const auto &[id, at] : reopenedAt)
             w.key(id).value(at);
         w.endObject();
     }

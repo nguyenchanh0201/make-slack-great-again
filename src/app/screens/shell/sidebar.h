@@ -113,6 +113,11 @@ public:
     // visit stamps (Settings::closedAt; onVisitedChanged fires).
     void                  setClosed(VisitStamps stamps);
     const VisitStamps    &closed() const { return _closed; }
+    // DMs and apps opened again after a close, and when: that counts as
+    // their latest activity (they lead their section). Saved the same way
+    // (Settings::reopenedAt).
+    void                  setReopened(VisitStamps stamps);
+    const VisitStamps    &reopened() const { return _reopened; }
     std::function<void()> onVisitedChanged;
     // Each section's sort by its key (sectionKey; defaults left out). The
     // shell keeps them per workspace and sets them on a switch;
@@ -251,46 +256,45 @@ private:
     bool sortsHold() const; // every sorted section still in its order
     void refreshTeammates();
 
-    screens::Context                             &_ctx;
-    Avatars                                      &_avatars;
-    ui::ScrollView                               *_scroll = nullptr;
-    ui::View                                     *_items  = nullptr;
-    SidebarFooter                                *_footer = nullptr;
-    Menus                                        *_menus  = nullptr;
-    std::vector<ConvRow *>                        _rows;
-    std::vector<ConvRow *>                        _rowOf; // by ConvRef: the row, else null
-    // DMs and apps that opened again after being closed, and when: that
-    // counts as their latest activity. shortcut: this run only, not saved.
-    std::unordered_map<model::ConvRef, model::Ts> _reopenedAt;
-    std::vector<char>                             _wasMember; // by ConvRef, as last seen
-    std::vector<TeammateRow *>                    _teamRows;
-    std::vector<model::Backend::AgentRole>        _team; // as last listed (rebuild)
-    std::string                                   _selectedTeammate;
-    std::vector<SectionHeader *>                  _sections;
-    std::vector<ui::View *>   _nav; // Activity, Threads, Saved, Scheduled messages
-    std::vector<const char *> _navTitles;
-    ui::View                 *_savedRow = nullptr, *_threadsRow = nullptr, *_scheduledRow = nullptr;
-    ui::View                 *_activityRow = nullptr;
-    Nav                       _navSelected = Nav::None;
-    VisitStamps               _visited; // opened here (visit stamps)
-    VisitStamps               _closed;  // closed here: when (epoch secs)
-    Sorts                     _sorts;
-    Filters                   _filters;
-    model::ConvRef            _selected        = model::kNoConv;
-    model::Store::ObserverId  _observer        = 0;
-    std::shared_ptr<int>      _alive           = std::make_shared<int>(0);
-    plat::TimerId             _rebuildTimer    = 0;
-    plat::TimerId             _usersTimer      = 0;
-    plat::TimerId             _sectionsTimer   = 0;
-    uint64_t                  _userShape       = 0; // userShape() at the last rebuild
+    screens::Context                      &_ctx;
+    Avatars                               &_avatars;
+    ui::ScrollView                        *_scroll = nullptr;
+    ui::View                              *_items  = nullptr;
+    SidebarFooter                         *_footer = nullptr;
+    Menus                                 *_menus  = nullptr;
+    std::vector<ConvRow *>                 _rows;
+    std::vector<ConvRow *>                 _rowOf;    // by ConvRef: the row, else null
+    VisitStamps                            _reopened; // conv id → epoch secs
+    model::Ts                              reopenedAt(model::ConvRef c) const;
+    std::vector<char>                      _wasMember; // by ConvRef, as last seen
+    std::vector<TeammateRow *>             _teamRows;
+    std::vector<model::Backend::AgentRole> _team; // as last listed (rebuild)
+    std::string                            _selectedTeammate;
+    std::vector<SectionHeader *>           _sections;
+    std::vector<ui::View *>                _nav; // Activity, Threads, Saved, Scheduled messages
+    std::vector<const char *>              _navTitles;
+    ui::View                *_savedRow = nullptr, *_threadsRow = nullptr, *_scheduledRow = nullptr;
+    ui::View                *_activityRow = nullptr;
+    Nav                      _navSelected = Nav::None;
+    VisitStamps              _visited; // opened here (visit stamps)
+    VisitStamps              _closed;  // closed here: when (epoch secs)
+    Sorts                    _sorts;
+    Filters                  _filters;
+    model::ConvRef           _selected        = model::kNoConv;
+    model::Store::ObserverId _observer        = 0;
+    std::shared_ptr<int>     _alive           = std::make_shared<int>(0);
+    plat::TimerId            _rebuildTimer    = 0;
+    plat::TimerId            _usersTimer      = 0;
+    plat::TimerId            _sectionsTimer   = 0;
+    uint64_t                 _userShape       = 0; // userShape() at the last rebuild
     // The Store and its profile / text revisions _userShape was taken at.
-    const model::Store       *_shapeStore      = nullptr;
-    uint64_t                  _shapeProfileRev = 0, _shapeTextRev = 0;
-    model::UserRef            _shapeMe         = model::kNoUser;
-    int                       _rebuilds        = 0;
-    bool                      _revealOnRebuild = false;
-    int                       _hiddenChannels  = 0;
-    bool                      _collapsed[5]    = {};        // starred, channels, DMs, apps, team
+    const model::Store      *_shapeStore      = nullptr;
+    uint64_t                 _shapeProfileRev = 0, _shapeTextRev = 0;
+    model::UserRef           _shapeMe         = model::kNoUser;
+    int                      _rebuilds        = 0;
+    bool                     _revealOnRebuild = false;
+    int                      _hiddenChannels  = 0;
+    bool                     _collapsed[5]    = {};         // starred, channels, DMs, apps, team
     std::unordered_map<std::string, bool> _collapsedCustom; // the user's sections, by id
     uint64_t _sectionsRev     = 0;       // Store::sectionsRevision at the last rebuild
     ConvRow *_dragRow         = nullptr; // a row being dragged

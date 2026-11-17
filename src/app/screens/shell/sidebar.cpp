@@ -849,8 +849,11 @@ Sidebar::Sidebar(screens::Context &ctx, Avatars &avatars) : _ctx(ctx), _avatars(
             // A closed DM or app opened again (its next message, or opened):
             // to the top of its section.
             if (ch.conv < _wasMember.size()) {
-                if (!_wasMember[ch.conv] && cv.member && cv.isDirect())
-                    _reopenedAt[ch.conv] = _ctx.backend.nowSecs() * 1000000;
+                if (!_wasMember[ch.conv] && cv.member && cv.isDirect() && !cv.id.empty()) {
+                    _reopened[cv.id] = _ctx.backend.nowSecs();
+                    if (onVisitedChanged)
+                        onVisitedChanged();
+                }
                 // Closed here: remembered, so a roster reload that lists it
                 // open again does not bring it back. shortcut: a close the
                 // service refused stays hidden here until its next message.
@@ -929,6 +932,18 @@ bool Sidebar::isApp(const model::Conversation &c) const {
 void Sidebar::setVisited(std::unordered_map<std::string, int64_t> stamps) {
     _visited = std::move(stamps);
     rebuild();
+}
+
+void Sidebar::setReopened(VisitStamps stamps) {
+    _reopened = std::move(stamps);
+    rebuild();
+}
+
+model::Ts Sidebar::reopenedAt(ConvRef c) const {
+    if (c >= _ctx.store().conversationCount())
+        return 0;
+    const auto it = _reopened.find(_ctx.store().conversation(c).id);
+    return it == _reopened.end() ? model::Ts(0) : model::Ts(it->second) * 1000000;
 }
 
 void Sidebar::setClosed(VisitStamps stamps) {
@@ -1094,10 +1109,7 @@ void Sidebar::rebuild() {
     for (ConvRef c = 0; c < store.conversationCount(); ++c)
         _wasMember[c] = store.conversation(c).member;
     // The reopened ones lead Direct messages and Agents & apps, latest first.
-    const auto reopened = [this](ConvRef c) {
-        const auto it = _reopenedAt.find(c);
-        return it == _reopenedAt.end() ? model::Ts(0) : it->second;
-    };
+    const auto reopened = [this](ConvRef c) { return reopenedAt(c); };
     for (int s : {2, 3})
         std::stable_sort(lists[s].begin(), lists[s].end(), [&](ConvRef a, ConvRef b) {
             return reopened(a) > reopened(b);
@@ -1353,10 +1365,8 @@ std::vector<size_t> Sidebar::sortedOrder(SectionSort sort, const std::vector<Con
         const auto &cv = store.conversation(rows[i]);
         keys[i].unread = sort.unreadsFirst && paintsUnread(cv);
         if (sort.by == SectionSort::By::Recent) {
-            const auto r   = _reopenedAt.find(rows[i]); // reopened counts as activity
-            keys[i].recent = std::max(
-                {cv.latest, cv.lastRead, r == _reopenedAt.end() ? model::Ts(0) : r->second}
-            );
+            // Reopened counts as activity.
+            keys[i].recent = std::max({cv.latest, cv.lastRead, reopenedAt(rows[i])});
         } else if (sort.by == SectionSort::By::Alpha)
             keys[i].name = utf8::foldCase(store.displayName(rows[i]));
     }

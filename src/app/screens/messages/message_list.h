@@ -128,9 +128,9 @@ public:
     // Scroll so the message is visible (search hits, permalinks); `flash`
     // briefly highlights it.
     void scrollToMessage(Ts ts, bool animated = true, bool flash = true);
-    // A search result: scrollToMessage, or — while the
-    // conversation's first page is still loading — once it is in. A target
-    // that page doesn't have is dropped; so is one the loaded list lacks.
+    // A search result: scrollToMessage, or once older pages bring it in
+    // (loaded until one reaches past it). A target the loaded span covers
+    // and lacks is dropped.
     void jumpTo(Ts ts);
 
     // "Reply in thread" from the toolbar or menu (default: Context::openThread).
@@ -283,6 +283,7 @@ private:
     void toggleQuickReaction(const std::string &name);
     void placeFileBar();
     bool applyJump();
+    bool jumpNeedsOlder() const; // the target is older than the loaded list, and more is there
 
 public:
     std::vector<Ts> threadRoots(Ts except) const; // for "Move to thread…"

@@ -1027,6 +1027,18 @@ TEST("slack write: downloadFile fetches with the workspace's credentials, writes
         CHECK_FALSE(miss.ok);
         CHECK_STR(miss.err, "http 404");
         CHECK_FALSE(file::exists(none));
+        // Cancelled (the tray's Pause / Cancel): answered at once, nothing
+        // written, and the transfer's own answer never comes.
+        Result            stop;
+        const std::string halt = file::join(dir, "halt.bin");
+        e.be->downloadFile(server() + "/files-pri/T1-F1/photo.bin", halt, stop.cb());
+        e.be->cancelDownload(halt);
+        CHECK(stop.called);
+        CHECK_FALSE(stop.ok);
+        CHECK_STR(stop.err, "cancelled");
+        pumpFor(200);
+        CHECK_FALSE(file::exists(halt));
+        e.be->cancelDownload(halt); // again, or unknown: nothing
         // The backend gone before the answer: done still runs (the caller's
         // background job ends), as a failure.
         Result gone;
@@ -1056,6 +1068,9 @@ TEST("slack: on Grid the org's methods go with the org token and the workspace's
     slack::apiCall(client, a, "client.counts", {}, count);
     slack::apiCall(client, a, "subscriptions.thread.getView", "limit=10&team_id=T9", count);
     slack::apiCall(client, a, "conversations.history", "channel=C1", count);
+    // The second client.counts only once the first is in: the log is in
+    // arrival order, which two calls in flight together don't keep.
+    REQUIRE(pumpUntil([&] { return done == 3; }));
     slack::Auth plain{"xoxc-ws", "xoxd-c"}; // off Grid: no org token
     slack::apiCall(client, plain, "client.counts", {}, count);
     REQUIRE(pumpUntil([&] { return done == 4; }));

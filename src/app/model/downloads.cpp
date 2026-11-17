@@ -4,11 +4,13 @@
 
 namespace model {
 
-int Downloads::begin(std::string name, std::string path) {
+int Downloads::begin(std::string name, std::string path, std::string kind, std::string source) {
     Item it;
     it.id   = _nextId++;
     it.name = std::move(name);
     it.path = std::move(path);
+    it.kind   = std::move(kind);
+    it.source = std::move(source);
     _items.push_back(std::move(it));
     _observers.notify();
     return _items.back().id;
@@ -43,6 +45,26 @@ void Downloads::finish(int id, bool ok, std::string error) {
     if (ok && it->total > 0)
         it->received = it->total;
     _observers.notify();
+}
+
+bool Downloads::pause(int id) {
+    Item *it = get(id);
+    if (!it || it->state != State::Running)
+        return false;
+    it->state = State::Paused;
+    _observers.notify();
+    return true;
+}
+
+bool Downloads::restart(int id) {
+    Item *it = get(id);
+    if (!it || (it->state != State::Paused && it->state != State::Failed))
+        return false;
+    it->state    = State::Running;
+    it->received = 0;
+    it->error.clear();
+    _observers.notify();
+    return true;
 }
 
 void Downloads::remove(int id) {

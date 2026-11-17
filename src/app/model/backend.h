@@ -68,6 +68,9 @@ public:
     virtual void leave(ConvRef conv);
     // The DM with `user` (opened or created); done gets kNoConv on failure.
     virtual void openDm(UserRef user, std::function<void(ConvRef)> done);
+    // A closed DM, group DM or app opened again, on the service too (Slack's
+    // conversations.open): member = true once it answers. Default: none.
+    virtual void reopen(ConvRef conv);
     virtual void setPinned(ConvRef conv, Ts ts, bool pinned);
     virtual void setSaved(ConvRef conv, Ts ts, bool saved);
     // Deletes a file from a message (own or as an admin).
@@ -92,6 +95,9 @@ public:
         if (done)
             done(false, "not supported");
     }
+    // Stops a downloadFile still under way to `toPath`: its done runs with
+    // "cancelled" (nothing is written). Unknown or finished: nothing.
+    virtual void cancelDownload(const std::string &toPath) { (void)toPath; }
     // "Remind me": a saved item with a due time (epoch secs); 0 removes it.
     virtual void setReminder(ConvRef conv, Ts ts, int64_t dueSecs);
 

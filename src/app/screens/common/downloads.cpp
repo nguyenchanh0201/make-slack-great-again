@@ -67,23 +67,60 @@ void startDownload(
     model::Backend    &backend,
     std::string        name,
     const std::string &source,
-    std::string        toPath
+    std::string        toPath,
+    std::string        kind
 ) {
-    const int job = model::jobs().begin(i18n::arg(i18n::tr("Downloading %1"), name));
-    const int id  = model::downloads().begin(std::move(name), toPath);
+    const int id =
+        model::downloads().begin(std::move(name), std::move(toPath), std::move(kind), source);
+    runDownload(app, backend, id);
+}
+
+// The fetch of a listed download (its first run, or a resume): a job while
+// it runs, its progress and end into the list. A pause or cancel stops the
+// transfer (done: "cancelled"), which finish() then ignores.
+void runDownload(plat::App &app, model::Backend &backend, int id) {
+    const model::Downloads::Item *it = model::downloads().find(id);
+    if (!it)
+        return;
+    const int job = model::jobs().begin(i18n::arg(i18n::tr("Downloading %1"), it->name));
     fetchFile(
         app,
         backend,
-        source,
-        std::move(toPath),
+        it->source,
+        it->path,
         [job, id](bool ok, const std::string &err) {
-            if (!ok)
+            if (!ok && err != "cancelled")
                 LOG_WARN("messages", "File download failed: %s", err.c_str());
             model::jobs().end(job);
             model::downloads().finish(id, ok, err);
         },
         [id](int64_t received, int64_t total) { model::downloads().progress(id, received, total); }
     );
+}
+
+void pauseDownload(model::Backend &backend, int id) {
+    auto &list = model::downloads();
+    if (const model::Downloads::Item *it = list.find(id); it && list.pause(id))
+        backend.cancelDownload(it->path);
+}
+
+void resumeDownload(plat::App &app, model::Backend &backend, int id) {
+    // shortcut: from the start (the transfer keeps the body in memory, so a
+    // paused one has nothing on disk); an HTTP Range resume would go on.
+    if (model::downloads().restart(id))
+        runDownload(app, backend, id);
+}
+
+void cancelDownload(model::Backend &backend, int id) {
+    auto                         &list = model::downloads();
+    const model::Downloads::Item *it   = list.find(id);
+    if (!it)
+        return;
+    const std::string path    = it->path;
+    const bool        running = it->state == model::Downloads::State::Running;
+    list.remove(id);
+    if (running)
+        backend.cancelDownload(path);
 }
 
 std::string tempDownloadPath(plat::App &app, std::string_view name) {

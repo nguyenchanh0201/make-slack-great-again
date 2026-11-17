@@ -355,7 +355,9 @@ TEST("unified search: all messages expands and Esc returns") {
     Panel p;
     p.us->field().insertText("talk");
     p.waitForSearch();
-    p.backend.pending[0].done(Panel::hits(p.f.talkAi, 20, "talk"));
+    auto found      = Panel::hits(p.f.talkAi, 20, "talk");
+    found[1].thread = 500000; // a reply: its thread goes with the jump
+    p.backend.pending[0].done(std::move(found));
     const auto k = p.kinds();
     REQUIRE(k.back() == Kind::AllMessages);
     p.us->choose(int(k.size()) - 1);
@@ -366,10 +368,11 @@ TEST("unified search: all messages expands and Esc returns") {
         CHECK(r.kind == Kind::FullResult);
     CHECK(p.backend.pending.size() == 1); // no second request
     ConvRef openedConv  = kNoConv;
-    Ts      openedTs    = 0;
-    p.us->onOpenMessage = [&](const std::string &, ConvRef c, Ts ts) {
-        openedConv = c;
-        openedTs   = ts;
+    Ts      openedTs = 0, openedThread = 0;
+    p.us->onOpenMessage = [&](const std::string &, ConvRef c, Ts ts, Ts thread) {
+        openedConv   = c;
+        openedTs     = ts;
+        openedThread = thread;
     };
     press(*p.win, plat::Key::Escape);
     CHECK_FALSE(p.us->showingAll());
@@ -379,6 +382,7 @@ TEST("unified search: all messages expands and Esc returns") {
     p.us->choose(1);
     CHECK(openedConv == p.f.talkAi);
     CHECK(openedTs == 19000000);
+    CHECK(openedThread == 500000);
     CHECK(p.closed);
 
     Panel q;
