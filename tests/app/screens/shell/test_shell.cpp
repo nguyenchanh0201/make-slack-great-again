@@ -4485,3 +4485,48 @@ TEST("emoji: picking from popup does not click through to views behind; deleting
     h.win->handle(bs);
     CHECK_STR(edit.text(), "hi ");
 }
+
+TEST("dm zero ui: visible DM badge, workspace attention, no banner replay, and independent thread floor") {
+    TwoWorkspaces  w;
+    const uint64_t beforeNotify = lastNotification(nullptr);
+    const ConvRef  dm           = w.a.findConversation("D0MIRA");
+    REQUIRE(dm != kNoConv);
+    const Ts ts200 = w.a.conversation(dm).latest + 100;
+    const Ts ts300 = ts200 + 100;
+    const Ts ts400 = ts300 + 100;
+
+    // Seed DM in workspace A with incoming=200, own reply=300, stale unread=1, mentions=1.
+    w.a.updateConversation(dm, [&](Conversation &c) {
+        c.lastRead = ts200 - 1;
+        c.latest   = ts300;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+    pump();
+    const int attWithDm = w.sh->sidebar().attentionCount();
+    CHECK(attWithDm >= 1);
+    CHECK(w.sh->sidebar().rowState(dm).badge >= 1);
+
+    // Remote read at 200 clears DM badge and workspace attention without replaying a desktop banner.
+    w.a.updateConversation(dm, [&](Conversation &c) {
+        c.lastRead = ts200;
+        c.unread   = 0;
+        c.mentions = 0;
+    });
+    pump();
+    CHECK(w.sh->sidebar().rowState(dm).badge == 0);
+    CHECK(w.sh->sidebar().attentionCount() == attWithDm - 1);
+    CHECK(lastNotification(nullptr) == beforeNotify);
+
+    // Real newer incoming DM at 400 restores badge and attention.
+    w.post(w.a, "D0MIRA", "genuinely newer DM");
+    pump();
+    CHECK(w.sh->sidebar().rowState(dm).badge >= 1);
+    CHECK(w.sh->sidebar().attentionCount() >= attWithDm);
+
+    // Followed thread with its own unread floor remains independently eligible.
+    w.a.setUnreadThreads(1);
+    pump();
+    CHECK(w.a.unreadThreads() == 1);
+    (void)ts400;
+}

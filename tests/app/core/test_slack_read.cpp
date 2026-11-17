@@ -9,10 +9,13 @@
 #include "app/slack/slack_json.h"
 #include "support/fake_slack_server.h"
 #include "base/json.h"
+#include "base/log.h"
 #include "base/time.h"
 #include "support/test.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -2056,6 +2059,83 @@ TEST("dm zero sources: roster reload, two-page context isolation, coherent Meta,
     e.be->pollUnreadCountsForTest();
     fakeslack::pumpFor(100);
     CHECK(e.store.conversation(d2).unread >= 1);
+}
+
+TEST("dm zero trace: opt-in slack-read trace logs decisions without leaking names, IDs, text, or tokens") {
+    if (!haveServer())
+        return;
+    Env e(kWorkspace, /*session=*/true);
+    REQUIRE(e.connect());
+    REQUIRE(pumpUntil([&] { return Log().count("client.counts") >= 1; }));
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    // Seed sentinel name/text that must NEVER appear in slack-read trace lines.
+    e.store.updateConversation(d1, [](model::Conversation &c) {
+        c.localName = "SENTINEL_DM_NAME";
+    });
+    model::Message sentinelMsg;
+    sentinelMsg.ts   = model::parseTs("1800000000.000200");
+    sentinelMsg.user = e.store.findUser("UMIRA");
+    sentinelMsg.text = "SENTINEL_SECRET_BODY";
+    e.store.addMessage(d1, std::move(sentinelMsg));
+
+    const std::string logPath =
+        (std::filesystem::temp_directory_path() / "msga-slack-read-trace.log").string();
+    std::remove(logPath.c_str());
+    const base::LogLevel prevLevel = base::logLevel();
+    base::setLogLevel(base::LogLevel::Info);
+    REQUIRE(base::setLogFile(logPath.c_str()));
+
+    auto readLog = [&] {
+        std::ifstream in(logPath);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+
+    // 1. Disabled mode emits no slack-read records.
+    base::test::unsetEnv("MSGA_SLACK_READ_TRACE");
+    slack::readstate::Observation obs;
+    obs.source           = slack::readstate::Source::ConversationInfo;
+    obs.lastRead         = model::parseTs("1800000000.000200");
+    obs.latest           = model::parseTs("1800000000.000200");
+    obs.display.unread   = {0, true};
+    obs.display.mentions = {0, true};
+    const auto staleCtx  = e.be->captureReadDispatchForTest();
+    e.be->applyReadObservationForTest(d1, obs, e.be->captureReadDispatchForTest());
+    CHECK(readLog().find("slack-read") == std::string::npos);
+
+    // 2. Enabled mode logs accept, reject, and defer decisions with context, and no sentinels.
+    base::test::setEnv("MSGA_SLACK_READ_TRACE", "1");
+    e.be->applyReadObservationForTest(d1, obs, e.be->captureReadDispatchForTest()); // accept
+    e.be->applyReadObservationForTest(d1, obs, staleCtx);                         // reject
+
+    // Defer via ambiguous marked event.
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.latest = model::parseTs("1800000000.000300");
+    });
+    slack::readstate::Observation markedObs;
+    markedObs.source           = slack::readstate::Source::Marked;
+    markedObs.lastRead         = model::parseTs("1800000000.000200");
+    markedObs.display.unread   = {0, true};
+    markedObs.display.mentions = {0, true};
+    e.be->applyMarkedEventForTest("D1", markedObs);
+
+    base::setLogFile("");
+    base::setLogLevel(prevLevel);
+    base::test::unsetEnv("MSGA_SLACK_READ_TRACE");
+
+    const std::string logged = readLog();
+    std::remove(logPath.c_str());
+    CHECK(logged.find("slack-read:") != std::string::npos);
+    CHECK(logged.find("decision=accept") != std::string::npos);
+    CHECK(logged.find("decision=superseded-observation") != std::string::npos);
+    CHECK(logged.find("decision=defer-ambiguous") != std::string::npos);
+    CHECK(logged.find("ctx=(") != std::string::npos);
+    CHECK(logged.find("SENTINEL_DM_NAME") == std::string::npos);
+    CHECK(logged.find("SENTINEL_SECRET_BODY") == std::string::npos);
+    CHECK(logged.find("xoxc-test") == std::string::npos);
+    CHECK(logged.find("UMIRA") == std::string::npos);
+    CHECK(logged.find("D1") == std::string::npos);
 }
 
 #endif // !_WIN32

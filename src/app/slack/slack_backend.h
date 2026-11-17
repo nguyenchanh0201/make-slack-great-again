@@ -260,6 +260,9 @@ public:
     ) {
         applyReadObservation(c, obs, context, allowBackwardCursor);
     }
+    void applyMarkedEventForTest(const std::string &channel, const readstate::Observation &obs) {
+        applyMarkedEvent(channel, obs);
+    }
     void readCallObservedForTest(
         std::string method,
         std::string form,
@@ -379,6 +382,15 @@ private:
     );
     void     queueReadReconcile(const std::string &channel);
     void     pumpReadReconcile();
+    void     traceReadObservation(
+        model::ConvRef                    c,
+        const readstate::Observation     &obs,
+        const readstate::DispatchContext &context,
+        model::Ts                         beforeRead,
+        uint32_t                          beforeUnread,
+        uint32_t                          beforeMentions,
+        const char                       *decision
+    ) const;
     uint64_t noteLocalMark(const std::string &channel, model::Ts desired);
     void     onMarkQueueDrained(const std::string &channel, uint64_t gen, bool ok);
     void     applyMarkedEvent(const std::string &channel, const readstate::Observation &obs);

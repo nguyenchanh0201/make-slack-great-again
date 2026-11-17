@@ -1339,10 +1339,18 @@ void SlackBackend::Read::applyRoster(std::vector<readstate::ConversationObservat
             carryLocal(fresh, s.conversation(r), &entry.read, &entry.context);
         if (!b.commitReadDecision(r, decision, entry.context)) {
             const model::Conversation &cur = s.conversation(r);
+            b.traceReadObservation(
+                r, entry.read, entry.context, cur.lastRead, cur.unread, cur.mentions, "reject"
+            );
             fresh.lastRead                 = cur.lastRead;
             fresh.latest                   = std::max(fresh.latest, cur.latest);
             fresh.unread                   = cur.unread;
             fresh.mentions                 = cur.mentions;
+        } else {
+            const model::Conversation &cur = s.conversation(r);
+            b.traceReadObservation(
+                r, entry.read, entry.context, cur.lastRead, cur.unread, cur.mentions, decision.reason
+            );
         }
         s.addConversation(std::move(fresh));
     }
@@ -4218,8 +4226,12 @@ void SlackBackend::applyReadObservation(
     const uint32_t                curUnread = cur.unread, curMentions = cur.mentions;
     const readstate::ReadDecision d =
         prepareReadObservation(c, cur, obs, context, allowBackwardCursor);
-    if (!commitReadDecision(c, d, context))
+    if (!commitReadDecision(c, d, context)) {
+        traceReadObservation(
+            c, obs, context, curLastRead, curUnread, curMentions, d.accept ? "reject" : d.reason
+        );
         return;
+    }
     if (d.lastRead != curLastRead || d.latest != curLatest || d.unread != curUnread ||
         d.mentions != curMentions) {
         _store.updateConversation(c, [&](model::Conversation &x) {
@@ -4229,6 +4241,43 @@ void SlackBackend::applyReadObservation(
             x.mentions = d.mentions;
         });
     }
+    traceReadObservation(c, obs, context, curLastRead, curUnread, curMentions, d.reason);
+}
+
+void SlackBackend::traceReadObservation(
+    ConvRef                           c,
+    const readstate::Observation     &obs,
+    const readstate::DispatchContext &context,
+    Ts                                beforeRead,
+    uint32_t                          beforeUnread,
+    uint32_t                          beforeMentions,
+    const char                       *decision
+) const {
+    const char *env = std::getenv("MSGA_SLACK_READ_TRACE");
+    if (!env || std::strcmp(env, "1") != 0 || c >= _store.conversationCount())
+        return;
+    static constexpr const char *kSources[] = {"info", "roster", "counts", "marked", "reconcile"};
+    const int                    si         = int(obs.source);
+    const char *src = (si >= 0 && si < 5) ? kSources[si] : "unknown";
+    const model::Conversation &after = _store.conversation(c);
+    LOG_INFO(
+        "slack-read",
+        "conv=%u src=%s decision=%s before=(%lld,%u,%u) after=(%lld,%u,%u) "
+        "ctx=(%llu,%llu,%llu,%llu)",
+        unsigned(c),
+        src,
+        decision ? decision : "",
+        (long long)beforeRead,
+        beforeUnread,
+        beforeMentions,
+        (long long)after.lastRead,
+        after.unread,
+        after.mentions,
+        (unsigned long long)context.dispatchId,
+        (unsigned long long)context.readEpoch,
+        (unsigned long long)context.arrivalEpoch,
+        (unsigned long long)context.observationEpoch
+    );
 }
 
 void SlackBackend::queueReadReconcile(const std::string &channel) {
@@ -4324,30 +4373,47 @@ void SlackBackend::applyMarkedEvent(
     if (const auto it = _readIntent.find(channel); it != _readIntent.end()) {
         ReadIntent &in = it->second;
         if (in.pending) {
-            if (ts != in.desired)
+            if (ts != in.desired) {
+                traceReadObservation(
+                    c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-pending"
+                );
                 return;
+            }
             in.awaitingEcho = false;
         } else if (in.awaitingEcho) {
             if (ts != in.desired) {
+                traceReadObservation(
+                    c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-reconcile"
+                );
                 queueReadReconcile(channel);
                 return;
             }
             in.awaitingEcho = false;
         } else if (ts < cur.lastRead) {
+            traceReadObservation(
+                c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-backward"
+            );
             queueReadReconcile(channel);
             return;
         }
     } else if (ts < cur.lastRead) {
+        traceReadObservation(c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-backward");
         queueReadReconcile(channel);
         return;
     }
     if (!obs.display.unread.value.has_value()) {
+        traceReadObservation(
+            c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-missing-count"
+        );
         queueReadReconcile(channel);
         return;
     }
     const uint32_t dispUnread = *obs.display.unread.value;
     if ((dispUnread == 0 && cur.latest > ts) ||
         (dispUnread > 0 && ts == cur.lastRead && cur.unread == 0)) {
+        traceReadObservation(
+            c, obs, {}, cur.lastRead, cur.unread, cur.mentions, "defer-ambiguous"
+        );
         queueReadReconcile(channel);
         return;
     }
