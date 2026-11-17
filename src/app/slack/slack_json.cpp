@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <unordered_set>
 
 namespace slack::mapjson {
@@ -43,6 +44,18 @@ std::string statusEmoji(std::string_view e) {
 model::Ts latestTs(const Value &c) {
     const Value v = c["latest"];
     return model::parseTs(v.isObject() ? v["ts"].str() : v.str());
+}
+
+readstate::Count parseCount(const Value &v) {
+    readstate::Count c;
+    if (!v.isNumber())
+        return c;
+    const int64_t n = v.integer(-1);
+    if (n < 0 || n > int64_t(std::numeric_limits<uint32_t>::max()))
+        return c;
+    c.value = uint32_t(n);
+    c.exact = true;
+    return c;
 }
 
 // ── Block Kit → mrkdwn ──────────────────────────────────────────────────────
@@ -393,6 +406,45 @@ int realNamesFrom(int override, int teamDefault) {
     return override == 0 ? teamDefault : kNoPref;
 }
 
+readstate::Observation conversationReadObservation(const json::Value &o, readstate::Source source) {
+    readstate::Observation obs;
+    obs.source = source;
+    const std::string_view cursor =
+        source == readstate::Source::Marked && o.has("ts") ? o["ts"].str() : o["last_read"].str();
+    if (const model::Ts lr = model::parseTs(cursor); lr > 0)
+        obs.lastRead = lr;
+    if (const model::Ts lt = latestTs(o); lt > 0)
+        obs.latest = lt;
+    obs.raw.unread       = parseCount(o["unread_count"]);
+    obs.raw.mentions     = parseCount(o["mention_count"]);
+    obs.display.unread   = parseCount(o["unread_count_display"]);
+    obs.display.mentions = parseCount(o["mention_count_display"]);
+    if (const Value hu = o["has_unreads"]; hu.isBool())
+        obs.hasUnreads = hu.boolean();
+    return obs;
+}
+
+readstate::Observation countsReadObservation(const json::Value &o, bool direct) {
+    readstate::Observation obs;
+    obs.source = readstate::Source::Counts;
+    if (const model::Ts lr = model::parseTs(o["last_read"].str()); lr > 0)
+        obs.lastRead = lr;
+    if (const model::Ts lt = latestTs(o); lt > 0)
+        obs.latest = lt;
+    if (direct) {
+        obs.raw.unread = parseCount(o["dm_count"]);
+        // dm_count is retained as source-specific raw data until domain equivalence is proven.
+        if (obs.raw.unread.value)
+            obs.raw.unread.exact = false;
+    }
+    obs.raw.mentions     = parseCount(o["mention_count"]);
+    obs.display.unread   = parseCount(o["unread_count_display"]);
+    obs.display.mentions = parseCount(o["mention_count_display"]);
+    if (const Value hu = o["has_unreads"]; hu.isBool())
+        obs.hasUnreads = hu.boolean();
+    return obs;
+}
+
 model::Conversation toConversation(const json::Value &o, model::Store &store) {
     model::Conversation c;
     c.id   = owned(o["id"]);
@@ -415,9 +467,10 @@ model::Conversation toConversation(const json::Value &o, model::Store &store) {
     c.memberCount        = uint32_t(o["num_members"].integer());
     c.lastRead           = model::parseTs(o["last_read"].str());
     c.latest             = latestTs(o);
-    const int64_t unread = o["unread_count"].integer();
-    c.unread   = unread > 0 ? uint32_t(unread) : (c.latest && c.lastRead && c.latest > c.lastRead);
-    c.mentions = uint32_t(o["mention_count"].integer());
+    const readstate::Observation obs =
+        conversationReadObservation(o, readstate::Source::ConversationInfo);
+    c.unread   = obs.display.unread.value.value_or(obs.raw.unread.value.value_or(0));
+    c.mentions = obs.display.mentions.value.value_or(obs.raw.mentions.value.value_or(0));
     c.muted    = o["is_muted"].boolean();
     c.starred  = o["is_starred"].boolean();
     const std::string_view pref = o["notification_preference"].str();
@@ -817,6 +870,7 @@ std::vector<Counts> toCounts(const json::Value &resp) {
                  uint32_t(o["dm_count"].integer()),
                  uint32_t(o["has_unreads"].boolean())}
             );
+            c.read = countsReadObservation(o, std::string_view(key) == "ims");
             out.push_back(std::move(c));
         }
     }

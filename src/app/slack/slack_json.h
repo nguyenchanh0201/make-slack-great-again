@@ -5,6 +5,7 @@
 
 #include "app/model/backend.h"
 #include "app/model/store.h"
+#include "app/slack/slack_read_state.h"
 #include "base/json.h"
 
 #include <string>
@@ -34,9 +35,10 @@ int                 namesDefault(const json::Value &prefs);
 // not decided (the override, or for 0 the default, not known).
 int                 realNamesFrom(int override, int teamDefault);
 // A conversations.list / client.userBoot / im.list / conversations.info
-// channel or IM. Unread falls back to 1 when latest > last_read (Slack often
-// reports unread_count 0 for channels).
-model::Conversation toConversation(const json::Value &c, model::Store &store);
+// channel or IM.
+model::Conversation    toConversation(const json::Value &c, model::Store &store);
+readstate::Observation conversationReadObservation(const json::Value &o, readstate::Source source);
+readstate::Observation countsReadObservation(const json::Value &o, bool direct);
 // A message from conversations.history / .replies / chat.postMessage /
 // search: text, user or bot identity, files, attachments and unfurls,
 // reactions, thread fields, edited, subtype. A message_changed event maps
@@ -69,9 +71,10 @@ bool newestHuddleRoom(const json::Value &messages, model::Store &store, HuddleRo
 
 // One client.counts entry (channels, mpims and ims alike).
 struct Counts {
-    std::string id;
-    model::Ts   latest = 0, lastRead = 0;
-    uint32_t    unread = 0, mentions = 0; // unread: a 1 stands in for has_unreads
+    std::string            id;
+    model::Ts              latest = 0, lastRead = 0;
+    uint32_t               unread = 0, mentions = 0; // movement-detection projections only
+    readstate::Observation read;
 };
 std::vector<Counts> toCounts(const json::Value &resp);
 

@@ -1405,14 +1405,14 @@ TEST("slack read: mappers — blocks, rich text, message_changed, conversations"
     );
     REQUIRE(d.parse(
         std::string_view(R"({"id": "C5", "name": "dev", "is_private": true,
-        "last_read": "10.0", "latest": {"ts": "20.0"}, "unread_count": 0,
+        "last_read": "10.0", "latest": {"ts": "20.0"}, "unread_count": 1,
         "notification_preference": "mentions",
         "properties": {"canvas": {"file_id": "F9"}}})"),
         nullptr
     ));
     const model::Conversation c = slack::mapjson::toConversation(d.root(), store);
     CHECK(c.kind == model::ConvKind::Private);
-    CHECK(c.unread == 1); // latest > last_read stands in for a missing count
+    CHECK(c.unread == 1);
     CHECK(c.notify == model::NotifyLevel::Mentions);
     CHECK(!c.canvasTitle.empty());
     CHECK_STR(c.canvasId, "F9");
@@ -1495,6 +1495,132 @@ TEST("slack read: stale snapshots do not restore unread over newer read or erase
     fakeslack::pumpFor(200);
     CHECK(e.store.conversation(d1).unread >= 1);
     (void)ts100;
+}
+
+TEST("dm zero parsing: explicit zero, missing, malformed, and raw/display domains") {
+    model::Store store;
+    auto         parse = [](std::string_view text) -> json::Document {
+        json::Document doc;
+        const bool     ok = doc.parse(std::string(text), nullptr);
+        CHECK(ok);
+        return doc;
+    };
+
+    // Explicit zero with latest > last_read (restored investigation repro).
+    {
+        const auto doc = parse(R"({"id":"D1","is_im":true,"user":"UMIRA",
+            "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
+            "unread_count":0,"unread_count_display":0,"mention_count":0})");
+        const auto obs = slack::mapjson::conversationReadObservation(
+            doc.root(), slack::readstate::Source::ConversationInfo
+        );
+        const auto c = slack::mapjson::toConversation(doc.root(), store);
+        CHECK(obs.raw.unread.value.has_value());
+        CHECK(*obs.raw.unread.value == 0);
+        CHECK(obs.display.unread.value == 0);
+        CHECK(obs.raw.mentions.value == 0);
+        CHECK(c.unread == 0);
+    }
+
+    // Omitted counts remain unknown.
+    {
+        const auto doc = parse(R"({"id":"D1","is_im":true,"user":"UMIRA",
+            "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"}})");
+        const auto obs = slack::mapjson::conversationReadObservation(
+            doc.root(), slack::readstate::Source::ConversationInfo
+        );
+        CHECK(!obs.raw.unread.value.has_value());
+        CHECK(!obs.display.unread.value.has_value());
+        CHECK(!obs.raw.mentions.value.has_value());
+        CHECK(!obs.hasUnreads.has_value());
+    }
+
+    // Positive count.
+    {
+        const auto doc = parse(R"({"unread_count":4,"mention_count":0})");
+        const auto obs = slack::mapjson::conversationReadObservation(
+            doc.root(), slack::readstate::Source::Roster
+        );
+        CHECK(obs.raw.unread.value == 4);
+        CHECK(obs.raw.mentions.value == 0);
+    }
+
+    // Malformed counts (negative, > UINT32_MAX, string, object, null) => unknown, not wraparound.
+    for (const char *frag : {
+             R"({"unread_count":-1})",
+             R"({"unread_count":4294967296})",
+             R"({"unread_count":"0"})",
+             R"({"unread_count":{}})",
+             R"({"unread_count":null})",
+             R"({"unread_count":1.5})",
+         }) {
+        const auto doc = parse(frag);
+        const auto obs = slack::mapjson::conversationReadObservation(
+            doc.root(), slack::readstate::Source::ConversationInfo
+        );
+        CHECK(!obs.raw.unread.value.has_value());
+    }
+
+    // Raw/display disagreement and domain-only fixtures survive without substitution.
+    {
+        const auto d1 = parse(R"({"unread_count":2,"unread_count_display":0})");
+        const auto o1 = slack::mapjson::conversationReadObservation(
+            d1.root(), slack::readstate::Source::ConversationInfo
+        );
+        CHECK(o1.raw.unread.value == 2);
+        CHECK(o1.display.unread.value == 0);
+
+        const auto d2 = parse(R"({"unread_count":0,"unread_count_display":2})");
+        const auto o2 = slack::mapjson::conversationReadObservation(
+            d2.root(), slack::readstate::Source::ConversationInfo
+        );
+        CHECK(o2.raw.unread.value == 0);
+        CHECK(o2.display.unread.value == 2);
+
+        const auto dOnly = parse(R"({"unread_count_display":3,"mention_count_display":1})");
+        const auto oDisp = slack::mapjson::conversationReadObservation(
+            dOnly.root(), slack::readstate::Source::Marked
+        );
+        CHECK(!oDisp.raw.unread.value.has_value());
+        CHECK(oDisp.display.unread.value == 3);
+        CHECK(!oDisp.raw.mentions.value.has_value());
+        CHECK(oDisp.display.mentions.value == 1);
+
+        const auto rOnly = parse(R"({"unread_count":3,"mention_count":1})");
+        const auto oRaw  = slack::mapjson::conversationReadObservation(
+            rOnly.root(), slack::readstate::Source::ConversationInfo
+        );
+        CHECK(oRaw.raw.unread.value == 3);
+        CHECK(!oRaw.display.unread.value.has_value());
+        CHECK(oRaw.raw.mentions.value == 1);
+        CHECK(!oRaw.display.mentions.value.has_value());
+    }
+
+    // Explicit false vs absent has_unreads, and client.counts dm_count/has_unreads semantics.
+    {
+        const auto cFalse = parse(R"({"id":"D1","dm_count":0,"mention_count":0,"has_unreads":false})");
+        const auto oFalse = slack::mapjson::countsReadObservation(cFalse.root(), true);
+        CHECK(oFalse.raw.unread.value == 0);
+        CHECK(!oFalse.raw.unread.exact);
+        CHECK(!oFalse.display.unread.value.has_value());
+        CHECK(oFalse.raw.mentions.value == 0);
+        CHECK(oFalse.raw.mentions.exact);
+        REQUIRE(oFalse.hasUnreads.has_value());
+        CHECK(!*oFalse.hasUnreads);
+
+        const auto cConflict = parse(R"({"id":"D1","dm_count":0,"has_unreads":true})");
+        const auto oConflict = slack::mapjson::countsReadObservation(cConflict.root(), true);
+        CHECK(oConflict.raw.unread.value == 0);
+        CHECK(!oConflict.raw.unread.exact);
+        REQUIRE(oConflict.hasUnreads.has_value());
+        CHECK(*oConflict.hasUnreads);
+
+        const auto cAbsent = parse(R"({"id":"C1","mention_count":2})");
+        const auto oAbsent = slack::mapjson::countsReadObservation(cAbsent.root(), false);
+        CHECK(!oAbsent.raw.unread.value.has_value());
+        CHECK(!oAbsent.hasUnreads.has_value());
+        CHECK(oAbsent.raw.mentions.value == 2);
+    }
 }
 
 #endif // !_WIN32
