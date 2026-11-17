@@ -403,6 +403,23 @@ struct SlackBackend::Read {
 
     void tick();
     void pollUnreadCounts();
+    void confirmMainReadState(std::vector<std::string> channels);
+    void confirmMainReadStateFromHistory(const std::string &channel);
+    void confirmMainReadStateFromHistoryBatch(
+        std::vector<std::pair<std::string, uint64_t>> batch,
+        size_t                                        idx,
+        std::function<void()>                         done
+    );
+    struct HistScan;
+    void scanMainReadHistoryPage(
+        const std::string                &channel,
+        uint64_t                          capGen,
+        Ts                                cursor,
+        std::optional<Ts>                 infoLatest,
+        std::string                       pageCursor,
+        std::shared_ptr<HistScan>         scan,
+        std::function<void()>             done
+    );
     // fromCounts: a client.counts snapshot (else the roster's own numbers).
     void applyActivity(
         const std::vector<mapjson::Counts> &snapshot,
@@ -1375,7 +1392,7 @@ readstate::ReadDecision SlackBackend::Read::carryLocal(
     const readstate::DispatchContext *context
 ) const {
     readstate::ReadDecision decision{
-        old.lastRead, old.latest, old.unread, old.mentions, true, false, false, "preserve", {}
+        old.lastRead, old.latest, old.unread, old.mentions, true, false, false, false, "preserve", {}
     };
     if (!obs || !context) {
         fresh.lastRead = old.lastRead;
@@ -4004,7 +4021,16 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
     bool                              allowBackwardCursor
 ) const {
     readstate::ReadDecision out{
-        candidate.lastRead, candidate.latest, candidate.unread, candidate.mentions, false, false, false, "", {}
+        candidate.lastRead,
+        candidate.latest,
+        candidate.unread,
+        candidate.mentions,
+        false,
+        false,
+        false,
+        false,
+        "",
+        {}
     };
     if (c >= _store.conversationCount()) {
         out.reason = "invalid-conv";
@@ -4044,38 +4070,47 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
                                : std::max(candidate.lastRead, obs.lastRead.value_or(0));
     const Ts newLatest   = std::max(candidate.latest, obs.latest.value_or(0));
 
+    const bool mainScope    = obs.coverage.scope == readstate::Scope::MainConversation;
+    const bool seedFromInfo = !mainScope && obs.source == readstate::Source::ConversationInfo &&
+                              !obs.hasThreadLatest && (!in || in->acceptedObsEpoch == 0);
+    const bool allowCounts  = mainScope || seedFromInfo;
+
     std::optional<uint32_t> exactUnread;
     std::optional<uint32_t> lowerBoundUnread;
-    if (obs.display.unread.value.has_value() && obs.display.unread.exact) {
-        exactUnread = *obs.display.unread.value;
-    } else if (
-        obs.source != readstate::Source::Reconcile &&
-        obs.source != readstate::Source::Marked &&
-        obs.source != readstate::Source::Counts &&
-        obs.raw.unread.value.has_value() && obs.raw.unread.exact
-    ) {
-        exactUnread = *obs.raw.unread.value;
-    }
-    if (!exactUnread.has_value() && obs.hasUnreads.has_value()) {
-        if (!*obs.hasUnreads)
-            exactUnread = 0;
-        else
-            lowerBoundUnread = 1;
-    }
-    if (obs.source == readstate::Source::Counts && !exactUnread.has_value() &&
-        obs.raw.unread.value.has_value() && *obs.raw.unread.value > 0) {
-        lowerBoundUnread = std::max(lowerBoundUnread.value_or(0), *obs.raw.unread.value);
+    if (allowCounts) {
+        if (obs.display.unread.value.has_value() && obs.display.unread.exact) {
+            exactUnread = *obs.display.unread.value;
+        } else if (
+            obs.source != readstate::Source::Reconcile &&
+            obs.source != readstate::Source::Marked &&
+            obs.source != readstate::Source::Counts &&
+            obs.raw.unread.value.has_value() && obs.raw.unread.exact
+        ) {
+            exactUnread = *obs.raw.unread.value;
+        }
+        if (!exactUnread.has_value() && obs.hasUnreads.has_value()) {
+            if (!*obs.hasUnreads)
+                exactUnread = 0;
+            else
+                lowerBoundUnread = 1;
+        }
+        if (obs.source == readstate::Source::Counts && !exactUnread.has_value() &&
+            obs.raw.unread.value.has_value() && *obs.raw.unread.value > 0) {
+            lowerBoundUnread = std::max(lowerBoundUnread.value_or(0), *obs.raw.unread.value);
+        }
     }
 
     std::optional<uint32_t> exactMentions;
-    if (obs.display.mentions.value.has_value() && obs.display.mentions.exact) {
-        exactMentions = *obs.display.mentions.value;
-    } else if (
-        obs.source != readstate::Source::Reconcile &&
-        obs.source != readstate::Source::Marked &&
-        obs.raw.mentions.value.has_value() && obs.raw.mentions.exact
-    ) {
-        exactMentions = *obs.raw.mentions.value;
+    if (allowCounts) {
+        if (obs.display.mentions.value.has_value() && obs.display.mentions.exact) {
+            exactMentions = *obs.display.mentions.value;
+        } else if (
+            obs.source != readstate::Source::Reconcile &&
+            obs.source != readstate::Source::Marked &&
+            obs.raw.mentions.value.has_value() && obs.raw.mentions.exact
+        ) {
+            exactMentions = *obs.raw.mentions.value;
+        }
     }
 
     const std::optional<Ts> obsThrough = obs.coverage.through ? obs.coverage.through : obs.latest;
@@ -4098,7 +4133,7 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
             } else if (postDispatch) {
                 overlapUnread += a.unread;
                 overlapMentions += a.mentions;
-            } else if (obs.coverage.scope != readstate::Scope::Thread) {
+            } else if (mainScope && obs.coverage.complete) {
                 const bool unreadCovered   = a.unread == 0 || exactUnread.has_value();
                 const bool mentionsCovered = a.mentions == 0 || exactMentions.has_value() ||
                                              (exactUnread.has_value() &&
@@ -4163,14 +4198,15 @@ readstate::ReadDecision SlackBackend::prepareReadObservation(
             newUnread = newMentions;
     }
 
-    out.lastRead       = newLastRead;
-    out.latest         = newLatest;
-    out.unread         = newUnread;
-    out.mentions       = newMentions;
-    out.accept         = true;
-    out.refresh        = needsRefresh;
-    out.clearsOverflow = (newLatest <= newLastRead) || (exactUnread.has_value() && !needsRefresh);
-    out.reason         = needsRefresh ? "accept-refresh" : "accept";
+    out.lastRead          = newLastRead;
+    out.latest            = newLatest;
+    out.unread            = newUnread;
+    out.mentions          = newMentions;
+    out.accept            = true;
+    out.refresh           = needsRefresh;
+    out.clearsOverflow    = (newLatest <= newLastRead) || (mainScope && exactUnread.has_value() && !needsRefresh);
+    out.advancesMainScope = mainScope;
+    out.reason            = needsRefresh ? "accept-refresh" : "accept";
     return out;
 }
 
@@ -4212,8 +4248,10 @@ bool SlackBackend::commitReadDecision(
         }
     }
 
-    in.acceptedObsEpoch   = ++_observationEpoch;
-    in.acceptedDispatchId = context.dispatchId;
+    if (decision.advancesMainScope) {
+        in.acceptedObsEpoch   = ++_observationEpoch;
+        in.acceptedDispatchId = context.dispatchId;
+    }
     // Retire arrivals covered by the accepted read cursor or explicitly absorbed by this baseline.
     in.arrivals.erase(
         std::remove_if(
@@ -4315,55 +4353,342 @@ void SlackBackend::queueReadReconcile(const std::string &channel) {
     pumpReadReconcile();
 }
 
-void SlackBackend::pumpReadReconcile() {
-    if (_reconcileActive || _reconcileQueue.empty() || !_read)
-        return;
-    const std::string channel = std::move(_reconcileQueue.front());
-    _reconcileQueue.pop_front();
-    ReadIntent &in       = _readIntent[channel];
-    in.reconcileQueued   = false;
-    in.reconcileInFlight = true;
-    _reconcileActive     = true;
-    const uint64_t capGen = in.gen;
-    _read->callObserved(
-        "conversations.info",
-        net::formEncode({{"channel", channel}}),
-        [this, channel, capGen](
+struct SlackBackend::Read::HistScan {
+    Ts                               cursor         = 0;
+    std::optional<Ts>                observedHead;
+    std::optional<Ts>                infoLatest;
+    readstate::DispatchContext       firstPageCtx;
+    bool                             hasFirstPageCtx = false;
+    int                              pages           = 0;
+    bool                             foundUnread     = false;
+    bool                             reachedEnd      = false;
+};
+
+void SlackBackend::Read::scanMainReadHistoryPage(
+    const std::string                &channel,
+    uint64_t                          capGen,
+    Ts                                cursor,
+    std::optional<Ts>                 infoLatest,
+    std::string                       pageCursor,
+    std::shared_ptr<HistScan>         scan,
+    std::function<void()>             done
+) {
+    const std::string oldestStr = model::formatTs(cursor);
+    std::string       form =
+        pageCursor.empty()
+            ? net::formEncode({{"channel", channel}, {"limit", "200"}, {"oldest", oldestStr}})
+            : net::formEncode({
+                  {"channel", channel},
+                  {"limit", "200"},
+                  {"oldest", oldestStr},
+                  {"cursor", pageCursor},
+              });
+
+    callObserved(
+        "conversations.history",
+        std::move(form),
+        [this, channel, capGen, cursor, infoLatest, scan, done = std::move(done)](
             const json::Document             &doc,
             const std::string                &err,
             const readstate::DispatchContext &ctx
-        ) {
-            _reconcileActive = false;
-            const auto it    = _readIntent.find(channel);
-            if (it == _readIntent.end()) {
-                pumpReadReconcile();
+        ) mutable {
+            const auto it = b._readIntent.find(channel);
+            if (it == b._readIntent.end() || it->second.gen != capGen || it->second.pending) {
+                done();
                 return;
             }
-            it->second.reconcileInFlight = false;
-            const bool wantAnother       = it->second.reconcileQueued;
-            it->second.reconcileQueued   = wantAnother;
-            if (wantAnother)
-                _reconcileQueue.push_back(channel);
-            if (it->second.gen == capGen && !it->second.pending) {
-                if (err.empty()) {
-                    it->second.awaitingEcho = false;
-                    const auto obs = mapjson::conversationReadObservation(
-                        doc.root()["channel"], readstate::Source::Reconcile
-                    );
-                    if (const ConvRef c = _store.findConversation(channel); c != kNoConv)
-                        applyReadObservation(c, obs, ctx, true);
-                } else if (
-                    err != "cancelled" && err != "channel_not_found" && !it->second.reconcileQueued
-                ) {
-                    it->second.reconcileQueued = true;
-                    _reconcileQueue.push_back(channel);
-                }
+            if (!scan->hasFirstPageCtx) {
+                scan->firstPageCtx    = ctx;
+                scan->hasFirstPageCtx = true;
             }
-            pumpReadReconcile();
+            if (!err.empty()) {
+                LOG_WARN(
+                    "slack",
+                    "confirmMainReadStateFromHistory: conversations.history failed (%s)",
+                    err.c_str()
+                );
+                done();
+                return;
+            }
+            const json::Value msgs = doc.root()["messages"];
+            if (scan->pages == 0) {
+                Ts maxTs = 0;
+                for (const json::Value m : msgs)
+                    maxTs = std::max(maxTs, model::parseTs(m["ts"].str()));
+                if (maxTs > 0)
+                    scan->observedHead = maxTs;
+                else if (infoLatest.has_value())
+                    scan->observedHead = infoLatest;
+            }
+            const std::string_view meId = s.me != kNoUser ? std::string_view(s.user(s.me).id)
+                                                          : std::string_view{};
+            for (const json::Value m : msgs) {
+                const Ts mts = model::parseTs(m["ts"].str());
+                if (mts <= 0)
+                    continue;
+                if (mts <= cursor) {
+                    scan->reachedEnd = true;
+                    continue;
+                }
+                if (!meId.empty() && m["user"].str() == meId)
+                    continue;
+                const Ts               threadTs = model::parseTs(m["thread_ts"].str());
+                const std::string_view subtype  = m["subtype"].str();
+                const bool             isOrdinaryReply =
+                    threadTs > 0 && threadTs != mts && subtype != "thread_broadcast";
+                if (isOrdinaryReply)
+                    continue;
+                scan->foundUnread = true;
+                break;
+            }
+            ++scan->pages;
+
+            if (scan->foundUnread) {
+                readstate::Observation obs;
+                obs.source            = readstate::Source::Reconcile;
+                obs.lastRead          = cursor;
+                obs.latest            = scan->observedHead;
+                obs.hasUnreads        = true;
+                obs.coverage.scope    = readstate::Scope::MainConversation;
+                obs.coverage.through  = scan->observedHead;
+                obs.coverage.complete = false;
+                it->second.awaitingEcho = false;
+                if (const ConvRef c = s.findConversation(channel); c != kNoConv)
+                    b.applyReadObservation(c, obs, scan->firstPageCtx, /*allowBackwardCursor=*/true);
+                done();
+                return;
+            }
+
+            const bool        hasMore = doc.root()["has_more"].boolean();
+            const std::string nextCursor =
+                std::string(doc.root()["response_metadata"]["next_cursor"].str());
+            if (!hasMore || scan->reachedEnd) {
+                readstate::Observation obs;
+                obs.source            = readstate::Source::Reconcile;
+                obs.lastRead          = cursor;
+                obs.latest            = scan->observedHead;
+                obs.display.unread    = {0, true};
+                obs.display.mentions  = {0, true};
+                obs.hasUnreads        = false;
+                obs.coverage.scope    = readstate::Scope::MainConversation;
+                obs.coverage.through  = scan->observedHead.value_or(cursor);
+                obs.coverage.complete = true;
+                it->second.awaitingEcho = false;
+                if (const ConvRef c = s.findConversation(channel); c != kNoConv)
+                    b.applyReadObservation(c, obs, scan->firstPageCtx, /*allowBackwardCursor=*/true);
+                done();
+                return;
+            }
+
+            static constexpr int kMaxConfirmPages = 5;
+            if (scan->pages < kMaxConfirmPages && !nextCursor.empty()) {
+                scanMainReadHistoryPage(
+                    channel, capGen, cursor, infoLatest, nextCursor, std::move(scan), std::move(done)
+                );
+                return;
+            }
+            LOG_WARN(
+                "slack",
+                "confirmMainReadStateFromHistory: history scan capped/incomplete"
+            );
+            done();
         },
         Read::Lane::Background,
         /*quiet=*/true
     );
+}
+
+void SlackBackend::Read::confirmMainReadStateFromHistory(const std::string &channel) {
+    const auto it     = b._readIntent.find(channel);
+    const uint64_t capGen = it != b._readIntent.end() ? it->second.gen : 0;
+    confirmMainReadStateFromHistoryBatch({{channel, capGen}}, 0, [this] {
+        b._reconcileActive = false;
+        b.pumpReadReconcile();
+    });
+}
+
+void SlackBackend::Read::confirmMainReadStateFromHistoryBatch(
+    std::vector<std::pair<std::string, uint64_t>> batch,
+    size_t                                        idx,
+    std::function<void()>                         done
+) {
+    if (idx >= batch.size()) {
+        done();
+        return;
+    }
+    const std::string channel = batch[idx].first;
+    const uint64_t    capGen  = batch[idx].second;
+    auto              next    = [this, batch = std::move(batch), idx, channel, done = std::move(done)]() mutable {
+        if (const auto it = b._readIntent.find(channel); it != b._readIntent.end()) {
+            it->second.reconcileInFlight = false;
+            if (it->second.reconcileQueued)
+                b._reconcileQueue.push_back(channel);
+        }
+        confirmMainReadStateFromHistoryBatch(std::move(batch), idx + 1, std::move(done));
+    };
+
+    const auto it = b._readIntent.find(channel);
+    if (it != b._readIntent.end() && (it->second.gen != capGen || it->second.pending)) {
+        next();
+        return;
+    }
+
+    callObserved(
+        "conversations.info",
+        net::formEncode({{"channel", channel}}),
+        [this, channel, capGen, next = std::move(next)](
+            const json::Document             &doc,
+            const std::string                &err,
+            const readstate::DispatchContext &ctx
+        ) mutable {
+            const auto it = b._readIntent.find(channel);
+            if (it != b._readIntent.end() && (it->second.gen != capGen || it->second.pending)) {
+                next();
+                return;
+            }
+            if (!err.empty()) {
+                if (err == "channel_not_found")
+                    b.markDead(channel);
+                else
+                    LOG_WARN(
+                        "slack",
+                        "confirmMainReadStateFromHistory: conversations.info failed (%s)",
+                        err.c_str()
+                    );
+                next();
+                return;
+            }
+            const auto infoObs = mapjson::conversationReadObservation(
+                doc.root()["channel"], readstate::Source::Reconcile
+            );
+            if (const ConvRef c = s.findConversation(channel); c != kNoConv)
+                b.applyReadObservation(c, infoObs, ctx, /*allowBackwardCursor=*/false);
+            const Ts cursor = infoObs.lastRead.value_or(0);
+            if (cursor <= 0) {
+                LOG_WARN("slack", "confirmMainReadStateFromHistory: missing last_read cursor");
+                next();
+                return;
+            }
+            auto scan        = std::make_shared<HistScan>();
+            scan->cursor     = cursor;
+            scan->infoLatest = infoObs.latest;
+            scanMainReadHistoryPage(
+                channel, capGen, cursor, infoObs.latest, {}, std::move(scan), std::move(next)
+            );
+        },
+        Read::Lane::Background,
+        /*quiet=*/true
+    );
+}
+
+void SlackBackend::Read::confirmMainReadState(std::vector<std::string> channels) {
+    std::vector<std::pair<std::string, uint64_t>> batch;
+    batch.reserve(channels.size());
+    for (std::string &ch : channels) {
+        ReadIntent &in       = b._readIntent[ch];
+        in.reconcileQueued   = false;
+        in.reconcileInFlight = true;
+        batch.emplace_back(std::move(ch), in.gen);
+    }
+
+    auto finishBatch = [this] {
+        b._reconcileActive = false;
+        b.pumpReadReconcile();
+    };
+
+    if (countsDisabled || countsUnavailable) {
+        confirmMainReadStateFromHistoryBatch(std::move(batch), 0, std::move(finishBatch));
+        return;
+    }
+
+    callObserved(
+        "client.counts",
+        {},
+        [this, batch = std::move(batch), finishBatch = std::move(finishBatch)](
+            const json::Document             &doc,
+            const std::string                &err,
+            const readstate::DispatchContext &ctx
+        ) mutable {
+            if (!err.empty()) {
+                if (err == "cancelled") {
+                    for (const auto &[ch, capGen] : batch) {
+                        if (const auto it = b._readIntent.find(ch); it != b._readIntent.end()) {
+                            it->second.reconcileInFlight = false;
+                            if (it->second.reconcileQueued)
+                                b._reconcileQueue.push_back(ch);
+                        }
+                    }
+                    finishBatch();
+                    return;
+                }
+                if (isMethodUnavailable(err))
+                    countsUnavailable = true;
+                confirmMainReadStateFromHistoryBatch(std::move(batch), 0, std::move(finishBatch));
+                return;
+            }
+
+            countsFailures = 0;
+            const auto snapshot = mapjson::toCounts(doc.root());
+            std::unordered_map<std::string_view, const mapjson::Counts *> byId;
+            byId.reserve(snapshot.size());
+            for (const mapjson::Counts &entry : snapshot)
+                byId[entry.id] = &entry;
+
+            std::vector<std::pair<std::string, uint64_t>> needHistory;
+            for (const auto &[ch, capGen] : batch) {
+                const auto it = b._readIntent.find(ch);
+                if (it == b._readIntent.end())
+                    continue;
+                if (it->second.gen != capGen || it->second.pending) {
+                    it->second.reconcileInFlight = false;
+                    if (it->second.reconcileQueued)
+                        b._reconcileQueue.push_back(ch);
+                    continue;
+                }
+                const auto found = byId.find(ch);
+                if (found != byId.end() && found->second->read.coverage.complete) {
+                    it->second.reconcileInFlight = false;
+                    it->second.awaitingEcho      = false;
+                    if (const ConvRef c = s.findConversation(ch); c != kNoConv)
+                        b.applyReadObservation(
+                            c, found->second->read, ctx, /*allowBackwardCursor=*/true
+                        );
+                    if (it->second.reconcileQueued)
+                        b._reconcileQueue.push_back(ch);
+                } else if (const ConvRef c = s.findConversation(ch);
+                           c != kNoConv && s.conversation(c).member) {
+                    needHistory.emplace_back(ch, capGen);
+                } else {
+                    it->second.reconcileInFlight = false;
+                    if (it->second.reconcileQueued)
+                        b._reconcileQueue.push_back(ch);
+                }
+            }
+
+            if (!needHistory.empty()) {
+                confirmMainReadStateFromHistoryBatch(
+                    std::move(needHistory), 0, std::move(finishBatch)
+                );
+                return;
+            }
+            finishBatch();
+        },
+        Read::Lane::Background,
+        /*quiet=*/true
+    );
+}
+
+void SlackBackend::pumpReadReconcile() {
+    if (_reconcileActive || _reconcileQueue.empty() || !_read)
+        return;
+    _reconcileActive = true;
+    std::vector<std::string> channels;
+    channels.reserve(_reconcileQueue.size());
+    while (!_reconcileQueue.empty()) {
+        channels.push_back(std::move(_reconcileQueue.front()));
+        _reconcileQueue.pop_front();
+    }
+    _read->confirmMainReadState(std::move(channels));
 }
 
 void SlackBackend::reconcileConversationReadState(const std::string &channel) {

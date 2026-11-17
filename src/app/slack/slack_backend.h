@@ -246,6 +246,9 @@ public:
     }
     void pollUnreadCountsForTest();
     void reloadConversationsForTest() { reloadConversations(); }
+    void reconcileConversationReadStateForTest(const std::string &channel) {
+        reconcileConversationReadState(channel);
+    }
     readstate::DispatchContext captureReadDispatchForTest() { return captureReadDispatch(); }
     void recordUnreadArrivalForTest(
         model::ConvRef   c,

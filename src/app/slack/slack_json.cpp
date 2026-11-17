@@ -421,6 +421,14 @@ readstate::Observation conversationReadObservation(const json::Value &o, readsta
     obs.display.mentions = parseCount(o["mention_count_display"]);
     if (const Value hu = o["has_unreads"]; hu.isBool())
         obs.hasUnreads = hu.boolean();
+    if (const Value lt = o["latest"]; lt.isObject()) {
+        const std::string_view ts  = lt["ts"].str();
+        const std::string_view tts = lt["thread_ts"].str();
+        obs.hasThreadLatest        = !tts.empty() && tts != ts;
+    }
+    obs.coverage.scope    = readstate::Scope::UnknownActivity;
+    obs.coverage.through  = obs.latest;
+    obs.coverage.complete = false;
     return obs;
 }
 
@@ -442,6 +450,9 @@ readstate::Observation countsReadObservation(const json::Value &o, bool direct) 
     obs.display.mentions = parseCount(o["mention_count_display"]);
     if (const Value hu = o["has_unreads"]; hu.isBool())
         obs.hasUnreads = hu.boolean();
+    obs.coverage.scope    = readstate::Scope::MainConversation;
+    obs.coverage.through  = obs.latest;
+    obs.coverage.complete = obs.hasUnreads.has_value() || obs.display.unread.value.has_value();
     return obs;
 }
 

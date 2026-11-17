@@ -40,6 +40,7 @@ struct Observation {
     std::optional<bool>      hasUnreads;
     Source                   source = Source::ConversationInfo;
     Coverage                 coverage;
+    bool                     hasThreadLatest = false;
 };
 
 struct DispatchContext {
@@ -66,6 +67,7 @@ struct ReadDecision {
     bool                  accept   = false;
     bool                  refresh  = false;
     bool                  clearsOverflow = false;
+    bool                  advancesMainScope = false;
     const char           *reason   = "";
     std::vector<uint64_t> absorbedSequences;
 };

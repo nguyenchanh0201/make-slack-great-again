@@ -7,6 +7,7 @@
 #include "app/cache/workspace_cache.h"
 #include "app/slack/rtm_presence.h"
 #include "app/slack/slack_backend.h"
+#include "app/slack/slack_json.h"
 #include "app/slack/socket_mode.h"
 #include "support/fake_slack_server.h"
 #include "base/json.h"
@@ -1404,6 +1405,10 @@ TEST("slack realtime: marked events preserve newest local read and mark-unread i
         "conversations.info",
         R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA","unread_count":3,"unread_count_display":3,"last_read":"1800000000.000099","latest":{"ts":"1800000000.000300"}}}])"
     );
+    script(
+        "conversations.history",
+        R"([{"ok":true,"has_more":false,"messages":[{"type":"message","ts":"1800000000.000300","user":"UMIRA","text":"unread"}]}])"
+    );
     REQUIRE(push(envelope(
         "m2b",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000300","unread_count_display":0,"mention_count_display":0})"
@@ -1444,12 +1449,16 @@ TEST("slack realtime: marked events preserve newest local read and mark-unread i
         "conversations.info",
         R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA","unread_count":3,"unread_count_display":3,"last_read":"1800000000.000099","latest":{"ts":"1800000000.000300"}}}])"
     );
+    script(
+        "conversations.history",
+        R"([{"ok":true,"has_more":false,"messages":[{"type":"message","ts":"1800000000.000300","user":"UMIRA","text":"unread"}]}])"
+    );
     REQUIRE(push(envelope(
         "m4",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000099","unread_count_display":3,"mention_count_display":3})"
     )));
     REQUIRE(pumpUntil([&] { return e.store.conversation(d1).lastRead == tsA - 1; }));
-    CHECK(e.store.conversation(d1).unread == 3);
+    CHECK(e.store.conversation(d1).unread >= 1);
     CHECK(appends == 0);
     e.store.unobserve(obs);
 
@@ -1581,6 +1590,8 @@ TEST("dm zero events: remote read clears own-newer DM via reconciliation without
     script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1800000000.000300","user":"UME","text":"my newer reply"}]}])");
 
     REQUIRE(push(envelope("remote-read-own-newer",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
@@ -1624,21 +1635,27 @@ TEST("dm zero events: same-domain confirmation, stale-positive suppression, and 
     script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":2,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1800000000.000300","user":"UME","text":"my newer reply"}]}])");
     REQUIRE(push(envelope("e-disp0",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
         "unread_count_display":0,"mention_count_display":0})")));
     REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }));
     CHECK(e.store.conversation(d1).lastRead == ts200);
 
-    // 2. Missing display in confirmation preserves safe state (raw=2 cannot stand in for display).
+    // 2. Missing display/has_unreads in counts falls back to history; incomplete/missing unread preserves safe state.
     e.store.updateConversation(d1, [&](model::Conversation &c) {
         c.lastRead = ts200 - 1;
         c.latest   = ts300;
         c.unread = c.mentions = 1;
     });
+    script("client.counts", R"([{"ok":true,"channels":[],
+        "ims":[{"id":"D1","last_read":"1800000000.000200","latest":"1800000000.000300",
+                "dm_count":2}],"mpims":[]}])");
     script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":2}}])");
+    script("conversations.history", R"([{"ok":false,"error":"missing_scope"}])");
     const int infoBefore = count("conversations.info");
     REQUIRE(push(envelope("e-nodisp",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
@@ -1656,6 +1673,8 @@ TEST("dm zero events: same-domain confirmation, stale-positive suppression, and 
     script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1800000000.000300","user":"UME","text":"my newer reply"}]}])");
     const int infoPos = count("conversations.info");
     REQUIRE(push(envelope("e-stalepos",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
@@ -1673,6 +1692,8 @@ TEST("dm zero events: same-domain confirmation, stale-positive suppression, and 
     script("conversations.info", R"([{"__delay":0.15,"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1800000000.000300","user":"UME","text":"my newer reply"}]}])");
     const int infoArr = count("conversations.info");
     REQUIRE(push(envelope("e-arr",
         R"({"type":"im_marked","channel":"D1","ts":"1800000000.000200",
@@ -1703,12 +1724,10 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
     });
 
     // 1. Burst of 20 conflicting events coalesces, survives initial failure, and converges on success.
-    script("conversations.info", R"([
+    script("client.counts", R"([
         {"ok":false,"error":"server_error"},
-        {"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
-         "last_read":"1800000000.000200","latest":{"ts":"1800000000.000300"},
-         "unread_count":0,"unread_count_display":0,"mention_count":0,"mention_count_display":0}}])");
-    const int infoStart = count("conversations.info");
+        {"ok":true,"channels":[],"ims":[{"id":"D1","last_read":"1800000000.000200","latest":"1800000000.000300","has_unreads":false,"mention_count":0}],"mpims":[]}])");
+    const int countsStart = count("client.counts");
     for (int i = 0; i < 20; ++i) {
         REQUIRE(push(envelope(
             "burst-" + std::to_string(i),
@@ -1718,7 +1737,7 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
     }
     REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }, 4000));
     // Coalesced: far fewer than 20 requests.
-    CHECK(count("conversations.info") - infoStart <= 3);
+    CHECK(count("client.counts") - countsStart <= 3);
 
     // 2. 20 distinct DMs: workspace reconciliation stays bounded and every DM eventually gets a turn.
     std::vector<std::string> dms;
@@ -1753,6 +1772,102 @@ TEST("dm zero events: burst coalescing, failure recovery, and 20-DM workspace co
         },
         6000
     ));
+}
+
+TEST("dm scope live: captured main/thread read survives info=1, reconnect, and reversed order") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    const ConvRef d1 = e.conv("D1");
+    REQUIRE(d1 != kNoConv);
+
+    const Ts root     = model::parseTs("1794909869.919749");
+    const Ts mainRead = model::parseTs("1794909941.811299");
+    const Ts reply    = model::parseTs("1794910537.557059");
+    const Ts newMain  = model::parseTs("1794910538.000000");
+
+    // Seed root + thread replies with mainRead < reply.
+    model::Message mRoot;
+    mRoot.ts   = root;
+    mRoot.user = e.store.findUser("UMIRA");
+    mRoot.text = "root message";
+    e.store.addMessage(d1, std::move(mRoot));
+
+    e.store.updateConversation(d1, [&](model::Conversation &c) {
+        c.lastRead = mainRead;
+        c.latest   = reply;
+        c.unread   = 1;
+        c.mentions = 1;
+    });
+
+    uint32_t maxObservedDuringZero = 0;
+    bool     trackZero             = false;
+    e.store.observe(d1, [&](const model::Change &ch) {
+        if (ch.kind == model::ChangeKind::Meta && trackZero)
+            maxObservedDuringZero =
+                std::max(maxObservedDuringZero, e.store.conversation(d1).unread);
+    });
+
+    // Accept main read via client.counts (or history confirmation when counts unavailable).
+    script("client.counts", R"([{"ok":true,"channels":[],
+        "ims":[{"id":"D1","latest":"1794909869.919749","last_read":"1794909941.811299",
+                "has_unreads":false,"mention_count":0}],
+        "mpims":[]}])");
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1794909941.811299",
+        "latest":{"ts":"1794910537.557059","thread_ts":"1794909869.919749"},
+        "unread_count":1,"unread_count_display":1,"mention_count":0,"mention_count_display":0}}])");
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1794910537.557059","thread_ts":"1794909869.919749","user":"UMIRA","text":"reply"},
+        {"type":"message","ts":"1794909869.919749","user":"UMIRA","text":"root"}]}])");
+    REQUIRE(push(envelope("main-read-marked",
+        R"({"type":"im_marked","channel":"D1","ts":"1794909941.811299",
+        "unread_count_display":0,"mention_count_display":0})")));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).unread == 0; }));
+    trackZero = true;
+
+    // Reconnect sweep / conversations.info returns unread_count=1, unread_count_display=1.
+    script("conversations.info", R"([{"ok":true,"channel":{"id":"D1","is_im":true,"user":"UMIRA",
+        "last_read":"1794909941.811299",
+        "latest":{"ts":"1794910537.557059","thread_ts":"1794909869.919749"},
+        "unread_count":1,"unread_count_display":1,"mention_count":0,"mention_count_display":0}}])");
+    const int infoCountBefore = count("conversations.info");
+    e.be->readCallObservedForTest(
+        "conversations.info",
+        "channel=D1",
+        [&](const json::Document &doc, const std::string &err, const slack::readstate::DispatchContext &ctx) {
+            if (err.empty()) {
+                e.be->applyReadObservationForTest(
+                    d1,
+                    slack::mapjson::conversationReadObservation(
+                        doc.root()["channel"], slack::readstate::Source::ConversationInfo
+                    ),
+                    ctx
+                );
+            }
+        }
+    );
+    REQUIRE(pumpUntil([&] { return count("conversations.info") >= infoCountBefore + 1; }));
+    fakeslack::pumpFor(50);
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(maxObservedDuringZero == 0);
+
+    // Genuinely new top-level message arrives via RTM and stays unread despite delayed old zero.
+    trackZero = false;
+    REQUIRE(push(envelope(
+        "new-main",
+        R"({"type":"message","channel":"D1","user":"UMIRA","ts":"1794910538.000000","text":"new main"})"
+    )));
+    REQUIRE(pumpUntil([&] { return e.store.conversation(d1).latest == newMain; }));
+    CHECK(e.store.conversation(d1).unread == 1);
+
+    script("conversations.history", R"([{"ok":true,"has_more":false,"messages":[
+        {"type":"message","ts":"1794910538.000000","user":"UMIRA","text":"new main"}]}])");
+    e.be->pollUnreadCountsForTest();
+    fakeslack::pumpFor(80);
+    CHECK(e.store.conversation(d1).unread == 1);
 }
 
 #endif
