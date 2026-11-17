@@ -538,6 +538,30 @@ TEST("slack realtime: a reconnect backfills the roster and the DM badges") {
     CHECK(e.store.conversation(e.conv("D1")).lastRead == model::parseTs("1700000000.000000"));
 }
 
+TEST("slack realtime: a resync answer older than my read leaves the DM read") {
+    if (!haveServer())
+        return;
+    Env e;
+    REQUIRE(e.connect());
+    REQUIRE(e.live());
+    // Read here up to the server's latest; its conversations.info still has
+    // the cursor from before (the mark on its way): 4 unread at 1700000000.
+    const ConvRef d1   = e.conv("D1");
+    const Ts      read = model::parseTs("1700000500.000000");
+    e.store.updateConversation(d1, [read](model::Conversation &x) {
+        x.lastRead = x.latest = read;
+        x.unread = x.mentions = 0;
+    });
+    const int infos = count("conversations.info");
+    ctl("POST", "/_ctl/ws/close", R"({"code": 1001})");
+    REQUIRE(pumpUntil([&] { return count("ws-open") == 2 && e.socket->connected(); }));
+    REQUIRE(pumpUntil([&] { return count("conversations.info") > infos; }, 5000));
+    pumpFor(600); // the batched patch
+    CHECK(e.store.conversation(d1).unread == 0);
+    CHECK(e.store.conversation(d1).mentions == 0);
+    CHECK(e.store.conversation(d1).lastRead == read);
+}
+
 TEST("slack realtime: a reconnect soon after a full DM sweep asks only the most active") {
     if (!haveServer())
         return;

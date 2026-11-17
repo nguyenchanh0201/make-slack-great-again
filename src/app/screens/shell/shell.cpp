@@ -3640,9 +3640,9 @@ void Shell::openUnifiedSearch() {
     };
     // The conversation opened the usual way, then the jump (it waits for the
     // first page if that is still loading).
-    raw->onOpenMessage = [this, reach](const std::string &key, ConvRef conv, Ts ts) {
+    raw->onOpenMessage = [this, reach](const std::string &key, ConvRef conv, Ts ts, Ts thread) {
         if (reach(key))
-            jumpToMessage(conv, ts, 0);
+            jumpToMessage(conv, ts, thread);
     };
     // Centred under the bar; centred near the top while the title bar is
     // hidden (clear of the edge, where full screen's menu bar slides in).

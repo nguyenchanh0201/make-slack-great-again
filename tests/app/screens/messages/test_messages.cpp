@@ -149,6 +149,25 @@ struct DownloadingBackend : fake::FakeBackend {
     std::vector<Asked>       asked;
     std::vector<std::string> resolved;         // resolveChannel ids
     bool                     reminders = true; // Capabilities::messageReminders
+    // Older pages served one per loadHistory, newest first (empty: the fake's
+    // single page).
+    std::vector<std::vector<model::Message>> older;
+    int                                      historyLoads = 0;
+    void loadHistory(ConvRef conv, Ts before, Done done) override {
+        if (older.empty())
+            return FakeBackend::loadHistory(conv, before, std::move(done));
+        ++historyLoads;
+        app().platform().post([this, conv, done = std::move(done)] {
+            std::vector<model::Message> page = std::move(older.front());
+            older.erase(older.begin());
+            const bool more = !older.empty();
+            _store.addPage(conv, std::move(page));
+            _store.updateConversation(conv, [more](model::Conversation &c) {
+                c.hasMoreBefore = more;
+            });
+            done(true, "");
+        });
+    }
     void         resolveChannel(const std::string &id) override { resolved.push_back(id); }
     Capabilities capabilities() const override {
         Capabilities c     = FakeBackend::capabilities();
@@ -993,6 +1012,40 @@ TEST(
     e.store.addMessage(later, msg(mira, 6000, "arrives later"));
     pump(4);
     CHECK_FALSE(e.list->flashing(6000 * 1000000LL));
+}
+
+TEST("anchoring: jumpTo — a search hit pages back further than one page, and stops once past it") {
+    Env                  e(true);
+    const model::UserRef mira = e.store.findUser("U0MIRA");
+    model::Conversation  c;
+    c.id               = "C0DEEP";
+    c.name             = "deep";
+    c.hasMoreBefore    = true;
+    const ConvRef deep = e.store.addConversation(std::move(c));
+    std::vector<model::Message> head;
+    for (int s = 9000; s <= 9900; s += 100)
+        head.push_back(msg(mira, s, "recent"));
+    e.store.addPage(deep, std::move(head));
+    for (int top : {8000, 7000, 6000, 5000}) {
+        std::vector<model::Message> page;
+        for (int s = top; s < top + 1000; s += 100)
+            if (s != 6550)
+                page.push_back(msg(mira, s, "older"));
+        e.backend.older.push_back(std::move(page));
+    }
+    e.store.updateConversation(deep, [](model::Conversation &x) { x.hasMoreBefore = true; });
+    e.list->showConversation(deep);
+    pump(10);
+    // Three pages back: each page that doesn't bring it asks for the next.
+    e.list->jumpTo(6100 * 1000000LL);
+    REQUIRE(until([&] { return e.list->flashing(6100 * 1000000LL); }));
+    CHECK(e.backend.older.size() == 1); // found: no page past it
+    // A deleted target inside what is loaded: dropped, no further loads.
+    const int loads = e.backend.historyLoads;
+    e.list->jumpTo(6550 * 1000000LL);
+    pump(10);
+    CHECK_FALSE(e.list->flashing(6550 * 1000000LL));
+    CHECK(e.backend.historyLoads == loads);
 }
 
 TEST("actions: a reaction pill toggles mine; the newest message on screen marks read") {

@@ -647,15 +647,18 @@ void SlackBackend::Live::applyPatches() {
         if (r == kNoConv)
             continue;
         const model::Conversation &c = s.conversation(r);
+        // Nothing past my read here: the count is from before it (the answer
+        // left before my mark landed), not news.
+        const uint32_t unread = !info.latest || info.latest > c.lastRead ? info.unread : 0;
         // For a DM every unread is a red-badge mention.
-        if (info.lastRead <= c.lastRead && info.latest <= c.latest && info.unread <= c.unread &&
-            info.unread <= c.mentions)
+        if (info.lastRead <= c.lastRead && info.latest <= c.latest && unread <= c.unread &&
+            unread <= c.mentions)
             continue;
-        s.updateConversation(r, [&info](model::Conversation &x) {
+        s.updateConversation(r, [&info, unread](model::Conversation &x) {
             x.lastRead = std::max(x.lastRead, info.lastRead);
             x.latest   = std::max(x.latest, info.latest);
-            x.unread   = std::max(x.unread, info.unread);
-            x.mentions = std::max(x.mentions, info.unread);
+            x.unread   = std::max(x.unread, unread);
+            x.mentions = std::max(x.mentions, unread);
         });
     }
     patches.clear();

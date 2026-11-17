@@ -2735,7 +2735,8 @@ void SlackBackend::Read::applyActivity(
         if (r != kNoConv) {
             const model::Conversation &x      = s.conversation(r);
             uint32_t                   unread = x.unread, mentions = x.mentions;
-            if (firstSeen && x.member && r != openConv) {
+            // Not when I've read past all it knows (a count from before my mark).
+            if (firstSeen && x.member && r != openConv && (!c.latest || c.latest > x.lastRead)) {
                 // Every DM unread is a red-badge "mention"; a muted
                 // conversation badges only explicit mentions.
                 const bool     muted = x.muted || x.notify == model::NotifyLevel::Nothing;

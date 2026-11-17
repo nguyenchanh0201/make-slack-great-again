@@ -575,9 +575,9 @@ void UnifiedSearch::choose(int index) {
         break;
     default: {
         const model::Backend::SearchHit &h = _hits[r.index];
-        act                                = [f = onOpenMessage, key, c = h.conv, ts = h.ts] {
+        act = [f = onOpenMessage, key, c = h.conv, ts = h.ts, th = h.thread] {
             if (f)
-                f(key, c, ts);
+                f(key, c, ts, th);
         };
         break;
     }

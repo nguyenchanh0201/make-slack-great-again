@@ -2121,8 +2121,9 @@ void MessageList::checkEdges() {
                 return;
             _loadingOlder = false;
             if (conv == _conv) {
-                // The page is in: a jump target it didn't bring won't come.
-                if (!applyJump())
+                // The page is in: a target still older than it waits for the
+                // next one (checkEdges asks); one it covers and lacks is gone.
+                if (!applyJump() && !jumpNeedsOlder())
                     _jumpTs = 0;
                 updateState(); // an empty first page changes no messages
                 scheduleEdgeCheck();
@@ -3067,23 +3068,25 @@ void MessageList::jumpTo(Ts ts) {
     _jumpTs = ts;
     if (applyJump() || _conv == model::kNoConv)
         return;
-    // Not loaded: wait for one older page (checkEdges asks for it while a
-    // jump is pending, wherever the list is scrolled) and give up when that
-    // page doesn't bring it either. So a target up to one page further back
-    // is reached, never a walk through the whole history for a deleted
-    // message. A thread's replies come in one load (Saved messages jumps to
-    // a reply).
+    // Not loaded: older pages come in (checkEdges asks while a jump is
+    // pending, wherever the list is scrolled) until one reaches back past the
+    // target, so a deleted message stops the walk there. A thread's replies
+    // come in one load (Saved messages jumps to a reply).
     if (threadMode()) {
         if (_ctx.store().replies(_conv, _root))
             _jumpTs = 0;
         return;
     }
+    if (!jumpNeedsOlder())
+        _jumpTs = 0;
+}
+
+bool MessageList::jumpNeedsOlder() const {
     const model::Conversation &c = _ctx.store().conversation(_conv);
     // Only an older page can still bring it in -- a target at or after what's
     // already loaded (not found there, or newer: a live arrival still to
     // come) is never going to show up by loading further back.
-    if (!c.hasMoreBefore || (!c.messages.empty() && ts >= c.messages.front().ts))
-        _jumpTs = 0;
+    return c.hasMoreBefore && (c.messages.empty() || _jumpTs < c.messages.front().ts);
 }
 
 bool MessageList::applyJump() {
