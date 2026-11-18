@@ -2123,8 +2123,10 @@ void MessageList::checkEdges() {
             if (conv == _conv) {
                 // The page is in: a target still older than it waits for the
                 // next one (checkEdges asks); one it covers and lacks is gone.
-                if (!applyJump() && !jumpNeedsOlder())
-                    _jumpTs = 0;
+                if (!applyJump() && !jumpNeedsOlder()) {
+                    if (const Ts missed = std::exchange(_jumpTs, 0); missed && onJumpMiss)
+                        onJumpMiss(conv, missed);
+                }
                 updateState(); // an empty first page changes no messages
                 scheduleEdgeCheck();
             }
@@ -3077,8 +3079,12 @@ void MessageList::jumpTo(Ts ts) {
             _jumpTs = 0;
         return;
     }
-    if (!jumpNeedsOlder())
-        _jumpTs = 0;
+    if (!jumpNeedsOlder()) {
+        if (const Ts missed = std::exchange(_jumpTs, 0); missed && onJumpMiss)
+            onJumpMiss(_conv, missed);
+        return;
+    }
+    scheduleEdgeCheck();
 }
 
 bool MessageList::jumpNeedsOlder() const {

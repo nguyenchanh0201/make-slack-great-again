@@ -1657,8 +1657,22 @@ void Shell::buildMain(View *parent) {
     auto *stack            = area->add<View>();
     stack->style().stack().flex(1);
 #ifdef MSGA_HAVE_MESSAGES
-    _messages = stack->add<screens::MessageList>(_ctx);
-    static_cast<screens::MessageList *>(_messages)->setTypingRow(false);
+    auto *ml = stack->add<screens::MessageList>(_ctx);
+    ml->setTypingRow(false);
+    ml->onJumpMiss = [this](ConvRef conv, Ts ts) {
+        const uint64_t     gen   = _jumpGen;
+        std::weak_ptr<int> alive = _agentAlive;
+        _ctx.backend.loadMessage(conv, ts, [this, alive, gen, conv, ts](bool ok, model::Message m) {
+            if (alive.expired() || gen != _jumpGen || conv != _current || !ok)
+                return;
+            if (!m.threadTs || m.threadTs == ts)
+                return;
+            openThread(conv, m.threadTs);
+            if (screens::ThreadPanel *p = static_cast<screens::ThreadPanel *>(threadPanel()))
+                p->list().jumpTo(ts);
+        });
+    };
+    _messages = ml;
 #else
     _messages = stack->add<MessageStandIn>(_ctx, _avatars);
 #endif
@@ -1957,6 +1971,7 @@ void Shell::syncDownloads() {
 void Shell::open(ConvRef conv) {
     if (!_signedIn || conv == kNoConv || conv >= _ctx.store().conversationCount())
         return;
+    ++_jumpGen;
     leaveTeammate(); // the teammate page keeps what was typed to it
     leavePages();
     showMessageArea();
@@ -2003,6 +2018,7 @@ void Shell::open(ConvRef conv) {
 }
 
 void Shell::leaveWorkspace() {
+    ++_jumpGen;
     leaveTeammate();
     leavePages();
     if (_activityPage)
@@ -2446,13 +2462,19 @@ void Shell::buildScheduledPage(View *stack) {
 void Shell::jumpToMessage(ConvRef conv, Ts ts, Ts thread) {
     if (conv == kNoConv || !ts)
         return;
-    if (conv != _current)
+    ++_jumpGen;
+    if (conv != _current) {
         open(conv);
+    } else {
+        leaveTeammate();
+        leavePages();
+        showCanvas(false);
+        showMessageArea();
+    }
     if (conv != _current)
         return;
 #ifdef MSGA_HAVE_MESSAGES
     if (!thread) {
-        showMessageArea();
         static_cast<screens::MessageList *>(_messages)->jumpTo(ts);
         return;
     }

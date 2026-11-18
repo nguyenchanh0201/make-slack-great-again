@@ -1910,6 +1910,11 @@ void SlackBackend::search(std::string query, std::function<void(std::vector<Sear
                 }
                 if (h.thread == h.ts)
                     h.thread = 0; // a root is a top-level hit
+                if (!h.thread) {
+                    if (const model::Message *cached = _store.findMessage(h.conv, h.ts);
+                        cached && cached->threadTs && cached->threadTs != h.ts)
+                        h.thread = cached->threadTs;
+                }
                 h.text = m["text"].str();
                 hits.push_back(h);
             }

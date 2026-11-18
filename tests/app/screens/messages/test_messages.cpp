@@ -1048,6 +1048,74 @@ TEST("anchoring: jumpTo — a search hit pages back further than one page, and s
     CHECK(e.backend.historyLoads == loads);
 }
 
+TEST("anchoring: jumpTo — older unloaded message in already-open scrollable DM") {
+    Env                  e(true);
+    const model::UserRef mira = e.store.findUser("U0MIRA");
+    model::Conversation  c;
+    c.id               = "C0DEEPDM";
+    c.name             = "deep-dm";
+    c.kind             = model::ConvKind::Dm;
+    c.dmUser           = mira;
+    c.hasMoreBefore    = true;
+    const ConvRef deep = e.store.addConversation(std::move(c));
+    std::vector<model::Message> head;
+    for (int s = 9000; s <= 12900; s += 100)
+        head.push_back(msg(mira, s, "recent"));
+    e.store.addPage(deep, std::move(head));
+    std::vector<model::Message> olderPage;
+    for (int s = 8000; s < 9000; s += 100)
+        olderPage.push_back(msg(mira, s, "older"));
+    e.backend.older.push_back(std::move(olderPage));
+    e.store.updateConversation(deep, [](model::Conversation &x) { x.hasMoreBefore = true; });
+    e.list->showConversation(deep);
+    pump(10);
+    REQUIRE(e.list->list().firstVisible() > 3);
+    const int loadsBefore = e.backend.historyLoads;
+    e.list->jumpTo(8100 * 1000000LL);
+    REQUIRE(until([&] { return e.list->flashing(8100 * 1000000LL); }));
+    CHECK(e.backend.historyLoads > loadsBefore);
+}
+
+TEST("anchoring: jumpTo — main-timeline miss invokes onJumpMiss") {
+    Env                  e(true);
+    const model::UserRef mira = e.store.findUser("U0MIRA");
+    model::Conversation  c;
+    c.id               = "C0MISS";
+    c.name             = "miss";
+    c.kind             = model::ConvKind::Dm;
+    c.dmUser           = mira;
+    c.hasMoreBefore    = true;
+    const ConvRef conv = e.store.addConversation(std::move(c));
+    std::vector<model::Message> head;
+    for (int s = 9000; s <= 12900; s += 100)
+        head.push_back(msg(mira, s, "recent"));
+    e.store.addPage(conv, std::move(head));
+    std::vector<model::Message> olderPage;
+    for (int s = 8000; s < 9000; s += 100)
+        if (s != 8550)
+            olderPage.push_back(msg(mira, s, "older"));
+    e.backend.older.push_back(std::move(olderPage));
+    e.store.updateConversation(conv, [](model::Conversation &x) { x.hasMoreBefore = true; });
+    e.list->showConversation(conv);
+    pump(10);
+    REQUIRE(e.list->list().firstVisible() > 3);
+
+    std::vector<std::pair<ConvRef, Ts>> misses;
+    e.list->onJumpMiss = [&](ConvRef cRef, Ts ts) { misses.emplace_back(cRef, ts); };
+
+    // Case 1: within loaded span (not present in main timeline, e.g. recent thread reply)
+    e.list->jumpTo(9550 * 1000000LL);
+    REQUIRE(misses.size() == 1);
+    CHECK(misses[0].first == conv);
+    CHECK(misses[0].second == 9550 * 1000000LL);
+
+    // Case 2: older than loaded span, paged back and still absent
+    e.list->jumpTo(8550 * 1000000LL);
+    REQUIRE(until([&] { return misses.size() == 2; }));
+    CHECK(misses[1].first == conv);
+    CHECK(misses[1].second == 8550 * 1000000LL);
+}
+
 TEST("actions: a reaction pill toggles mine; the newest message on screen marks read") {
     Env           e(true);
     const ConvRef design = e.conv("C0DESIGN");

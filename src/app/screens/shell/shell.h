@@ -511,6 +511,7 @@ private:
     std::unique_ptr<ProfileCards> _profiles;
 
     model::ConvRef              _current = model::kNoConv;
+    uint64_t                    _jumpGen = 0;
     NavHistory                  _nav;
     bool                        _navApplying = false, _navSwitching = false;
     // A back/forward jump into a workspace whose

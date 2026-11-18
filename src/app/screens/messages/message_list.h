@@ -138,6 +138,9 @@ public:
     // "Edit message" on one's own message; unset = no Edit item. The shell's
     // composer handles the editing itself.
     std::function<void(ConvRef, Ts)> onEdit;
+    // Called when a main-timeline jumpTo(ts) determines `ts` is not in the
+    // main conversation (neither loaded nor reachable via older history).
+    std::function<void(ConvRef, Ts)> onJumpMiss;
 
     ui::VirtualList &list() { return *_list; }
 

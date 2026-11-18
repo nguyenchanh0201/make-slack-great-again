@@ -515,12 +515,20 @@ TEST("slack write: search maps channel, ts and thread; unknown channels are skip
     if (!haveServer())
         return;
     Env e;
+    model::Message cachedReply;
+    cachedReply.ts       = model::parseTs("1700000004.000500");
+    cachedReply.threadTs = model::parseTs("1700000000.000100");
+    cachedReply.text     = "cached reply";
+    std::vector<model::Message> cachedPage;
+    cachedPage.push_back(std::move(cachedReply));
+    e.store.addPage(e.dm, std::move(cachedPage));
     script(
         "search.messages",
         R"([{"ok":true,"messages":{"matches":[
             {"channel":{"id":"C1"},"ts":"1700000001.000200","permalink":"https://x/p1"},
             {"channel":{"id":"D1"},"ts":"1700000002.000300",
              "permalink":"https://x/archives/D1/p1700000002000300?thread_ts=1700000000.000100&cid=D1"},
+            {"channel":{"id":"D1"},"ts":"1700000004.000500","permalink":"https://x/archives/D1/p1700000004000500"},
             {"channel":{"id":"C404"},"ts":"1700000003.000400"}]}}])"
     );
     std::vector<model::Backend::SearchHit> hits;
@@ -530,10 +538,11 @@ TEST("slack write: search maps channel, ts and thread; unknown channels are skip
         got  = true;
     });
     REQUIRE(pumpUntil([&] { return got; }));
-    REQUIRE(hits.size() == 2);
+    REQUIRE(hits.size() == 3);
     CHECK(hits[0].conv == e.general && hits[0].ts == model::parseTs("1700000001.000200"));
     CHECK(hits[0].thread == 0);
     CHECK(hits[1].conv == e.dm && hits[1].thread == model::parseTs("1700000000.000100"));
+    CHECK(hits[2].conv == e.dm && hits[2].thread == model::parseTs("1700000000.000100"));
     const Log   log;
     json::Value q = log.get("search.messages")["form"];
     CHECK_STR(q["query"].str(), "hello world");

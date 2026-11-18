@@ -3451,6 +3451,46 @@ TEST("thread panel: at full width, whatever needs the messages brings them back"
     CHECK(messages->visible());
 }
 
+TEST("jumpToMessage: thread reply with thread == 0 resolves thread via loadMessage and clears overlays") {
+    Harness       h;
+    const ConvRef design = h.conv("C0DESIGN");
+    const Ts      root   = h.backend.findTs(design, "Proposal B");
+    REQUIRE(root != 0);
+    // Load the thread once so FakeBackend's Store holds its replies, then close it
+    // and switch to another conversation.
+    h.sh->open(design);
+    pump();
+    h.sh->openThread(design, root);
+    pump();
+    REQUIRE(h.sh->threadOpen());
+    const std::vector<model::Message> *replies = h.store.replies(design, root);
+    REQUIRE(replies);
+    REQUIRE(!replies->empty());
+    const Ts replyTs = replies->front().ts;
+    h.sh->closeThread();
+    pump();
+    REQUIRE(!h.sh->threadOpen());
+
+    // Jump with thread == 0 (simulating Slack search.messages omitting thread_ts):
+    // onJumpMiss resolves m.threadTs via loadMessage and opens the thread panel.
+    h.sh->jumpToMessage(design, replyTs, 0);
+    pump();
+    CHECK(h.sh->threadOpen());
+#ifdef MSGA_HAVE_MESSAGES
+    REQUIRE(h.sh->threadPanel());
+    CHECK(static_cast<screens::ThreadPanel *>(h.sh->threadPanel())->list().flashing(replyTs));
+#endif
+
+    // Same-conversation jump with an overview page open dismisses the page.
+    h.sh->closeThread();
+    h.sh->showPage(shell::Shell::Page::Saved);
+    pump();
+    REQUIRE(h.sh->pageOpen(shell::Shell::Page::Saved));
+    h.sh->jumpToMessage(design, root, 0);
+    pump();
+    CHECK_FALSE(h.sh->pageOpen(shell::Shell::Page::Saved));
+}
+
 TEST("thread panel: a window too narrow for both covers the messages, a wider one splits again") {
     Harness       h;
     plat::Window &w      = h.win->native();
