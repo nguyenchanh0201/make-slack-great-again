@@ -884,7 +884,7 @@ TEST("slack read: an open thread whose root left the head page asks for its root
               {"type": "message", "ts": "1700000300.000000", "thread_ts": "1700000200.000200",
                "user": "UJONAS", "text": "one"}]}})");
     REQUIRE(e.history(c, 0));
-    const Ts newer = model::parseTs("1700009000.000000");
+    const Ts   newer  = model::parseTs("1700009000.000000");
     const auto unread = e.store.conversation(c).unread;
     REQUIRE(e.store.conversation(c).messages.size() == 1);
     REQUIRE(e.store.conversation(c).messages.front().ts == newer);
@@ -892,7 +892,7 @@ TEST("slack read: an open thread whose root left the head page asks for its root
     bool loaded = false, ok = false;
     e.be->loadThread(c, root, [&](bool success, const std::string &) {
         loaded = true;
-        ok = success;
+        ok     = success;
     });
     REQUIRE(pumpUntil([&] { return loaded; }) && ok);
     REQUIRE(e.store.replies(c, root) && e.store.replies(c, root)->size() == 1);

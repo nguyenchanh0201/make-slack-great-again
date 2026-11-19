@@ -2924,7 +2924,9 @@ TEST("loading: a thread shows the ring, not its root, until the replies are in")
     CHECK(e.list->state() == State::Loading);
     REQUIRE(e.backend.threads.size() == 1);
     model::Message reply = msg(e.mira, 2100, "reply");
+    const Ts       replyTs = reply.ts;
     reply.threadTs       = rootTs;
+    e.list->jumpTo(replyTs);
     std::vector<model::Message> replies;
     replies.push_back(std::move(reply));
     e.store.addPage(c, std::move(replies));
@@ -2937,6 +2939,56 @@ TEST("loading: a thread shows the ring, not its root, until the replies are in")
     for (const auto &it : e.list->items())
         messages += it.kind == Kind::Message;
     CHECK(messages == 2);
+    CHECK(e.list->flashing(replyTs));
+}
+
+TEST("loading: reopening a thread keeps its new jump through an earlier failure") {
+    using State = MessageList::State;
+    HoldEnv       e;
+    const ConvRef c     = e.conv("C2");
+    const Ts      root  = 2000 * 1000000LL;
+    const Ts      other = 2200 * 1000000LL;
+    e.list->showThread(c, root);
+    e.list->showThread(c, other);
+    e.list->showThread(c, root);
+    REQUIRE(e.backend.threads.size() == 3);
+    model::Message reply   = msg(e.mira, 2100, "reply without its parent");
+    const Ts       replyTs = reply.ts;
+    reply.threadTs         = root;
+    e.list->jumpTo(replyTs);
+    e.backend.threads[0](false, "thread_not_found");
+    e.backend.threads[1](false, "thread_not_found");
+    CHECK(e.list->state() == State::Loading);
+    std::vector<model::Message> replies;
+    replies.push_back(std::move(reply));
+    e.store.addPage(c, std::move(replies));
+    e.backend.threads[2](true, {});
+    pump();
+    CHECK(e.list->state() == State::None);
+    CHECK(e.list->flashing(replyTs));
+}
+
+TEST("loading: a failed thread jump does not flash a reply that arrives later") {
+    using State = MessageList::State;
+    HoldEnv        e;
+    const ConvRef  c       = e.conv("C2");
+    const Ts       root    = 2000 * 1000000LL;
+    model::Message reply   = msg(e.mira, 2100, "late reply");
+    const Ts       replyTs = reply.ts;
+    reply.threadTs         = root;
+    e.list->showThread(c, root);
+    e.list->jumpTo(replyTs);
+    REQUIRE(e.backend.threads.size() == 1);
+    e.backend.threads[0](false, "thread_not_found");
+    CHECK(e.list->state() == State::Empty);
+    std::vector<model::Message> replies;
+    replies.push_back(std::move(reply));
+    e.store.addPage(c, std::move(replies));
+    pump();
+    CHECK(e.list->state() == State::None);
+    CHECK_FALSE(e.list->flashing(replyTs));
+    e.list->jumpTo(replyTs);
+    CHECK(e.list->flashing(replyTs));
 }
 
 // ── Summarize down (the job and its dialog) ─────────────────────────────────

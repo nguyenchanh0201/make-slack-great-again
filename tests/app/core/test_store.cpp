@@ -433,9 +433,9 @@ TEST("store: thread replies update their root") {
 }
 
 TEST("store: fetched thread parents stay outside channel history") {
-    Fixture f;
+    Fixture      f;
     Conversation other;
-    other.id = "C2";
+    other.id         = "C2";
     const ConvRef c2 = f.s.addConversation(std::move(other));
     f.s.addPage(f.c, page({400}, f.mira));
     Recorder r;

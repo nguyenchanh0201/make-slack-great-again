@@ -362,6 +362,7 @@ private:
     uint32_t                   _bodyEpoch = 0;
     MessageRow                *_rows = nullptr; // every message row (live, kept, spare), linked
     bool                       _loadingOlder = false, _loadingThread = false, _waiting = false;
+    uint64_t                   _threadLoadGen = 0;
     // Selection.
     TextPos                    _selAnchor, _selFocus;
     bool                       _selDragging = false;

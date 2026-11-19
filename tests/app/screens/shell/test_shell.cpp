@@ -80,9 +80,10 @@ void pump(int n = 10) {
 }
 
 // A whole shell over the test fixture, loaded synchronously.
-struct Harness {
+template <typename BackendType>
+struct ShellHarness {
     Store             store;
-    fake::FakeBackend backend{store, app().platform()};
+    BackendType       backend{store, app().platform()};
 #ifdef MSGA_HAVE_MESSAGES
     screens::ImageCache images{app().platform()};
     screens::Context    ctx{app(), store, backend, images, {}, {}, {}, {}, {}};
@@ -97,7 +98,7 @@ struct Harness {
     std::unique_ptr<shell::Shell> sh;
 
     // ai: the LLM layer the shell's composers see from the start (main's).
-    explicit Harness(llm::Service *ai = nullptr) {
+    explicit ShellHarness(llm::Service *ai = nullptr) {
         ctx.ai = ai;
         backend.setFixture(MSGA_TEST_ASSETS, base::fromLocal(2026, 9, 21, 16, 0));
         bool done = false;
@@ -114,6 +115,7 @@ struct Harness {
     }
     ConvRef conv(const char *id) const { return store.findConversation(id); }
 };
+using Harness = ShellHarness<fake::FakeBackend>;
 
 std::vector<TextEdit::Run> run(uint32_t a, uint32_t b, uint8_t f, std::string_view link = {}) {
     return {TextEdit::Run{a, b, f, link}};
@@ -3490,6 +3492,90 @@ TEST("jumpToMessage: thread reply with thread == 0 resolves thread via loadMessa
     pump();
     CHECK_FALSE(h.sh->pageOpen(shell::Shell::Page::Saved));
 }
+
+#ifdef MSGA_HAVE_MESSAGES
+TEST("thread panel: a search result opens an unloaded thread and highlights its reply") {
+    struct SearchBackend final : fake::FakeBackend {
+        using FakeBackend::FakeBackend;
+        SearchHit hit;
+        Done      completeThread;
+        void      search(std::string, std::function<void(std::vector<SearchHit>)> done) override {
+            done({hit});
+        }
+        void loadThread(ConvRef, Ts, Done done) override {
+            if (done)
+                completeThread = std::move(done);
+        }
+    };
+    ShellHarness<SearchBackend> h;
+    Conversation                archived;
+    archived.id            = "COLD";
+    archived.name          = "old-channel";
+    archived.hasMoreBefore = false;
+    const ConvRef c        = h.store.addConversation(std::move(archived));
+    const Ts      root = parseTs("1700000200.000200"), replyTs = parseTs("1700000300.000000");
+    h.backend.hit.conv   = c;
+    h.backend.hit.ts     = replyTs;
+    h.backend.hit.thread = root;
+    h.backend.hit.text   = "searched phrase";
+
+    REQUIRE(h.sh->current() != c);
+    h.sh->openUnifiedSearch();
+    auto *search = h.sh->unifiedSearch();
+    REQUIRE(search);
+    search->field().insertText("searched phrase");
+    search->tick(0);
+    search->tick(shell::UnifiedSearch::kDebounceMs + 1);
+    using RowKind    = shell::UnifiedSearch::RowKind;
+    const auto &rows = search->rows();
+    const auto  hit  = std::find_if(rows.begin(), rows.end(), [](const auto &row) {
+        return row.kind == RowKind::Message;
+    });
+    REQUIRE(hit != rows.end());
+    search->choose(int(hit - rows.begin()));
+    pump();
+    REQUIRE(h.sh->current() == c);
+    REQUIRE(h.sh->threadPanel());
+    auto &list = static_cast<screens::ThreadPanel *>(h.sh->threadPanel())->list();
+    CHECK(list.state() == screens::MessageList::State::Loading);
+    REQUIRE(h.backend.completeThread);
+    Message parent;
+    parent.ts   = root;
+    parent.user = h.store.me;
+    parent.text = "older parent";
+    h.store.setThreadRoot(c, root, std::move(parent));
+    Message reply;
+    reply.ts       = replyTs;
+    reply.threadTs = root;
+    reply.user     = h.store.me;
+    reply.text     = "searched phrase";
+    std::vector<Message> replies;
+    for (int i = 35; i > 0; --i) {
+        Message earlier;
+        earlier.ts       = replyTs - i * 1000000LL;
+        earlier.threadTs = root;
+        earlier.user     = h.store.me;
+        earlier.text     = "Earlier reply";
+        replies.push_back(std::move(earlier));
+    }
+    replies.push_back(std::move(reply));
+    h.store.addPage(c, std::move(replies));
+    h.backend.completeThread(true, {});
+    pump();
+    using ItemKind = screens::MessageList::ItemKind;
+    std::vector<Ts> visible;
+    for (const auto &item : list.items())
+        if (item.kind == ItemKind::Message)
+            visible.push_back(item.ts);
+    REQUIRE(visible.size() == 37);
+    CHECK(visible.front() == root);
+    CHECK(visible.back() == replyTs);
+    CHECK(list.flashing(replyTs));
+    CHECK(list.list().firstVisible() > 0);
+    CHECK(list.list().viewFor(int(list.items().size()) - 1) != nullptr);
+    CHECK(h.store.conversation(c).messages.empty());
+}
+#endif
 
 TEST("thread panel: a window too narrow for both covers the messages, a wider one splits again") {
     Harness       h;

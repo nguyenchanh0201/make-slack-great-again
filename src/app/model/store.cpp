@@ -533,8 +533,8 @@ const Message *Store::findMessage(ConvRef ref, Ts ts) const {
 const Message *Store::threadRoot(ConvRef ref, Ts root) const {
     if (ref >= _convs.size() || !root)
         return nullptr;
-    const Conversation &c = _convs[ref];
-    const auto parent = std::lower_bound(
+    const Conversation &c      = _convs[ref];
+    const auto          parent = std::lower_bound(
         c.messages.begin(), c.messages.end(), root, [](const Message &message, Ts ts) {
             return message.ts < ts;
         }
@@ -548,7 +548,7 @@ const Message *Store::threadRoot(ConvRef ref, Ts root) const {
 void Store::setThreadRoot(ConvRef ref, Ts root, Message message) {
     if (ref >= _convs.size() || !root || message.ts != root)
         return;
-    Conversation &c = _convs[ref];
+    Conversation &c  = _convs[ref];
     message.threadTs = root;
     if (Thread *t = findThread(c, root)) {
         if (t->rootMessage && *t->rootMessage == message)
@@ -735,7 +735,7 @@ bool Store::updateMessage(ConvRef ref, Ts ts, const std::function<void(Message &
 bool Store::removeMessage(ConvRef ref, Ts ts) {
     if (ref >= _convs.size())
         return false;
-    Message *m = findMessage(ref, ts);
+    Message      *m = findMessage(ref, ts);
     Conversation &c = _convs[ref];
     if (!m) {
         if (!std::erase_if(c.threads, [ts](const Thread &t) {

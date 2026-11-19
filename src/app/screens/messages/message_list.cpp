@@ -1518,7 +1518,9 @@ const model::Message *MessageList::message(Ts ts) const {
     if (_conv == model::kNoConv)
         return nullptr;
     const model::Store &st = _ctx.store();
-    if (_root && ts != _root)
+    if (_root) {
+        if (ts == _root)
+            return st.threadRoot(_conv, _root);
         if (const std::vector<model::Message> *r = st.replies(_conv, _root)) {
             const auto it =
                 std::lower_bound(r->begin(), r->end(), ts, [](const model::Message &m, Ts t) {
@@ -1527,6 +1529,7 @@ const model::Message *MessageList::message(Ts ts) const {
             if (it != r->end() && it->ts == ts)
                 return &*it;
         }
+    }
     return st.findMessage(_conv, ts);
 }
 
@@ -1600,6 +1603,7 @@ void MessageList::showThread(ConvRef conv, Ts root) {
     _root          = root;
     _jumpTs        = 0;
     _loadingThread = false;
+    const uint64_t loadGen = ++_threadLoadGen;
     // A thread reads from its root down; a short one sits at the top.
     _list->setBottomAligned(false);
     rebuild(false);
@@ -1612,13 +1616,18 @@ void MessageList::showThread(ConvRef conv, Ts root) {
         rebuild(false);
         resetRows();
         std::weak_ptr<char> alive = _alive;
-        _ctx.backend.loadThread(conv, root, [this, alive, conv, root](bool, const std::string &) {
-            if (alive.expired() || !_loadingThread || conv != _conv || root != _root)
-                return;
-            _loadingThread = false;
-            rebuild(false);
-            resetRows();
-        });
+        _ctx.backend.loadThread(
+            conv, root, [this, alive, conv, root, loadGen](bool ok, const std::string &) {
+                if (alive.expired() || loadGen != _threadLoadGen || conv != _conv || root != _root)
+                    return;
+                _loadingThread = false;
+                rebuild(false);
+                resetRows();
+                if (!ok || !applyJump())
+                    _jumpTs = 0;
+                scheduleEdgeCheck();
+            }
+        );
     }
     updateState();
 }
@@ -1679,10 +1688,11 @@ void MessageList::rebuild(bool notify) {
             addRun(c.messages, true);
         } else if (_loadingThread) {
             // Nothing until the replies are in (the loading state).
-        } else if (const model::Message *root = _ctx.store().findMessage(_conv, _root)) {
-            // The thread view: the root and its replies as one run with day
-            // dividers ("Yesterday" above the root), no reply-count row.
-            std::vector<const model::Message *> run{root};
+        } else {
+            // The parent may live outside loaded history or be unavailable.
+            std::vector<const model::Message *> run;
+            if (const model::Message *root = _ctx.store().threadRoot(_conv, _root))
+                run.push_back(root);
             if (const auto *replies = _ctx.store().replies(_conv, _root))
                 for (const model::Message &m : *replies)
                     run.push_back(&m);
@@ -1805,9 +1815,20 @@ void MessageList::onChange(const model::Change &ch) {
     default:
         break;
     }
+    // A history page can replace the fallback parent with its timeline row.
+    bool parentInPage = false;
+    if (_root && !ch.thread && (ch.kind == CK::Prepend || ch.kind == CK::Append)) {
+        const auto  &store    = _ctx.store();
+        const size_t position = store.indexOf(_conv, _root);
+        if (position != SIZE_MAX) {
+            const size_t count = store.conversation(_conv).messages.size();
+            parentInPage =
+                ch.kind == CK::Prepend ? position < ch.count : count - position <= ch.count;
+        }
+    }
     const bool mine = _root == 0 ? ch.thread == 0
                                  : ch.thread == _root || (ch.thread == 0 && ch.ts == _root) ||
-                                       ch.kind == CK::Reset;
+                                       parentInPage || ch.kind == CK::Reset;
     // An inline thread's replies live in its root's row.
     if (!mine && _root == 0 && ch.thread && has(_inlineThreads, ch.thread)) {
         rowChanged(ch.thread);
@@ -1833,6 +1854,9 @@ void MessageList::onChange(const model::Change &ch) {
             _list->itemsChanged(i, 1);
     } else {
         rebuild(true);
+        if (parentInPage || (_root && ch.kind == CK::Insert && !ch.thread && ch.ts == _root))
+            if (const int i = itemIndex(_root); i >= 0)
+                _list->itemsChanged(i, 1);
     }
     applyOpenTarget();
     applyJump();
@@ -3075,7 +3099,7 @@ void MessageList::jumpTo(Ts ts) {
     // target, so a deleted message stops the walk there. A thread's replies
     // come in one load (Saved messages jumps to a reply).
     if (threadMode()) {
-        if (_ctx.store().replies(_conv, _root))
+        if (!_loadingThread)
             _jumpTs = 0;
         return;
     }
