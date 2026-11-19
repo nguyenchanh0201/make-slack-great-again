@@ -680,15 +680,17 @@ public:
         composer = add<Composer>(ctx, drafts);
 #endif
     }
-    void show(ConvRef conv, Ts root) {
+    void show(ConvRef conv, Ts root, bool refresh = false) {
         this->conv = conv;
         this->root = root;
 #ifdef MSGA_HAVE_MESSAGES
-        panel->show(conv, root);
+        panel->show(conv, root, refresh);
         typing->setTarget(conv, root);
 #else
         where->setText(convTitle(_ctx.store(), conv));
         list->setTarget(conv, root);
+        if (refresh)
+            _ctx.backend.loadThread(conv, root, nullptr);
 #endif
         composer->setTarget(conv, root);
     }
@@ -2273,14 +2275,13 @@ bool Shell::removeIdleSession(const Event &e) {
 void Shell::openThread(ConvRef conv, Ts root) {
     if (conv != _current)
         open(conv);
-    _thread->show(conv, root); // stashes the previous thread's draft
+    _thread->show(conv, root, true); // stashes the previous thread's draft
 #ifdef MSGA_HAVE_MESSAGES
     // Its reply bar in the list says "Close thread".
     static_cast<screens::MessageList *>(_messages)->setOpenThreadRoot(root);
 #endif
     _thread->setVisible(true); // ThreadBody fits the saved width to the window
     _splitter->setVisible(true);
-    _ctx.backend.loadThread(conv, root, nullptr);
     _ctx.backend.setActiveConversation(conv, root);
     // The focus stays where it was (the reply bar that opened it).
 }

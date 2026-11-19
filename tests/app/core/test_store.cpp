@@ -453,6 +453,13 @@ TEST("store: fetched thread parents stay outside channel history") {
     CHECK_STR(f.s.threadRoot(c2, 100)->text, "different channel");
     CHECK(f.s.findMessage(f.c, 100) == nullptr);
     CHECK(f.s.conversation(f.c).messages.size() == 1);
+    REQUIRE(f.s.setReaction(f.c, 100, "tada", f.me, true));
+    REQUIRE(f.s.threadRoot(f.c, 100)->reactions.size() == 1);
+    CHECK(f.s.reactedByMe(f.s.threadRoot(f.c, 100)->reactions.front()));
+    REQUIRE(f.s.updateMessage(f.c, 100, [](Message &m) { m.text = "edited parent"; }));
+    CHECK_STR(f.s.threadRoot(f.c, 100)->text, "edited parent");
+    CHECK(f.s.findMessage(f.c, 100) == nullptr);
+    CHECK(r.log.back().kind == ChangeKind::Update && r.log.back().thread == 100);
 
     f.s.addPage(f.c, page({100}, f.mira));
     REQUIRE(f.s.updateMessage(f.c, 100, [](Message &m) { m.text = "from history"; }));

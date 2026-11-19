@@ -95,11 +95,11 @@ ThreadPanel::ThreadPanel(Context &ctx) : _ctx(ctx) {
     _broadcastRow->setVisible(false);
 }
 
-void ThreadPanel::show(ConvRef conv, Ts root) {
+void ThreadPanel::show(ConvRef conv, Ts root, bool refresh) {
     // Another thread: the tick was for a reply there.
     if (conv != conversation() || root != this->root())
         _wanted = false;
-    _list->showThread(conv, root);
+    _list->showThread(conv, root, refresh);
     // An agent session's thread is a subagent's run, which a reply goes on to
     // (relayed by the session), or a side conversation branched off it
     // (/btw), which is also a session of its own. A subagent that hasn't

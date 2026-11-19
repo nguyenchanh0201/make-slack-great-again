@@ -466,7 +466,8 @@ void SlackBackend::Live::onMessage(const json::Value &ev, bool ours) {
     }
     if (sub == "message_changed" || sub == "message_replied") {
         // Only a message we hold changes: anything else isn't worth mapping.
-        if (c == kNoConv || !s.findMessage(c, model::parseTs(ev["message"]["ts"].str())))
+        const Ts ts = model::parseTs(ev["message"]["ts"].str());
+        if (c == kNoConv || (!s.findMessage(c, ts) && !s.threadRoot(c, ts)))
             return;
         // The new shape of a message we may hold: replace what the server
         // says, keep where it sits and what only we know.

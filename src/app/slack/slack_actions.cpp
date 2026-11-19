@@ -994,6 +994,8 @@ void SlackBackend::edit(ConvRef conv, Ts ts, std::string text) {
 void SlackBackend::editBlocks(ConvRef conv, Ts ts, std::string text, std::string blocks) {
     ts                      = _write->serverTs(conv, ts);
     const model::Message *m = _store.findMessage(conv, ts);
+    if (!m)
+        m = _store.threadRoot(conv, ts);
     if (!m || m->pending)
         return;
     auto before = std::make_shared<std::pair<std::string, bool>>(m->text, m->edited);

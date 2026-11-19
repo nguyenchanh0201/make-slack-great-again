@@ -85,7 +85,7 @@ public:
 
     void    showConversation(ConvRef conv);
     // Thread mode (the thread panel): the root, a "N replies" divider, the replies.
-    void    showThread(ConvRef conv, Ts root);
+    void    showThread(ConvRef conv, Ts root, bool refresh = false);
     void    clear(); // shows nothing, stops observing
     ConvRef conversation() const { return _conv; }
     Ts      threadRoot() const { return _root; }
@@ -363,6 +363,7 @@ private:
     MessageRow                *_rows = nullptr; // every message row (live, kept, spare), linked
     bool                       _loadingOlder = false, _loadingThread = false, _waiting = false;
     uint64_t                   _threadLoadGen = 0;
+    bool                       _threadLoadPending = false;
     // Selection.
     TextPos                    _selAnchor, _selFocus;
     bool                       _selDragging = false;

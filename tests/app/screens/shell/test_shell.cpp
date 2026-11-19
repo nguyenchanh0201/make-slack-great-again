@@ -3520,20 +3520,22 @@ TEST("thread panel: a search result opens an unloaded thread and highlights its 
     h.backend.hit.text   = "searched phrase";
 
     REQUIRE(h.sh->current() != c);
-    h.sh->openUnifiedSearch();
-    auto *search = h.sh->unifiedSearch();
-    REQUIRE(search);
-    search->field().insertText("searched phrase");
-    search->tick(0);
-    search->tick(shell::UnifiedSearch::kDebounceMs + 1);
-    using RowKind    = shell::UnifiedSearch::RowKind;
-    const auto &rows = search->rows();
-    const auto  hit  = std::find_if(rows.begin(), rows.end(), [](const auto &row) {
-        return row.kind == RowKind::Message;
-    });
-    REQUIRE(hit != rows.end());
-    search->choose(int(hit - rows.begin()));
-    pump();
+    auto select = [&] {
+        h.sh->openUnifiedSearch();
+        auto *search = h.sh->unifiedSearch();
+        REQUIRE(search);
+        search->field().insertText("searched phrase");
+        search->tick(0);
+        search->tick(shell::UnifiedSearch::kDebounceMs + 1);
+        const auto &rows = search->rows();
+        const auto  hit  = std::find_if(rows.begin(), rows.end(), [](const auto &row) {
+            return row.kind == shell::UnifiedSearch::RowKind::Message;
+        });
+        REQUIRE(hit != rows.end());
+        search->choose(int(hit - rows.begin()));
+        pump();
+    };
+    select();
     REQUIRE(h.sh->current() == c);
     REQUIRE(h.sh->threadPanel());
     auto &list = static_cast<screens::ThreadPanel *>(h.sh->threadPanel())->list();
@@ -3560,7 +3562,7 @@ TEST("thread panel: a search result opens an unloaded thread and highlights its 
     }
     replies.push_back(std::move(reply));
     h.store.addPage(c, std::move(replies));
-    h.backend.completeThread(true, {});
+    std::exchange(h.backend.completeThread, {})(true, {});
     pump();
     using ItemKind = screens::MessageList::ItemKind;
     std::vector<Ts> visible;
@@ -3574,6 +3576,25 @@ TEST("thread panel: a search result opens an unloaded thread and highlights its 
     CHECK(list.list().firstVisible() > 0);
     CHECK(list.list().viewFor(int(list.items().size()) - 1) != nullptr);
     CHECK(h.store.conversation(c).messages.empty());
+
+    // Opening a cached thread still fetches a newer reply selected in search.
+    const Ts newReplyTs = replyTs + 1000000;
+    h.backend.hit.ts    = newReplyTs;
+    select();
+    CHECK(list.state() == screens::MessageList::State::None);
+    REQUIRE(h.backend.completeThread);
+    Message newest;
+    newest.ts       = newReplyTs;
+    newest.threadTs = root;
+    newest.user     = h.store.me;
+    newest.text     = "Newer match";
+    std::vector<Message> refresh;
+    refresh.push_back(std::move(newest));
+    h.store.addPage(c, std::move(refresh));
+    std::exchange(h.backend.completeThread, {})(true, {});
+    pump();
+    CHECK(list.flashing(newReplyTs));
+    CHECK(list.list().lastVisible() == int(list.items().size()) - 1);
 }
 #endif
 

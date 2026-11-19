@@ -2517,14 +2517,15 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
             if (acc->rootLastRead > 0)
                 threadRead(c, root, acc->rootLastRead);
             if (acc->haveRoot) {
-                const bool updated = s.updateMessage(c, root, [&](model::Message &r) {
-                    r.replyCount  = acc->rootMsg.replyCount;
-                    r.latestReply = acc->rootMsg.latestReply;
-                    r.replyUsers  = acc->rootMsg.replyUsers;
-                    r.threadTs    = root;
-                });
-                // A search can open a thread whose parent predates loaded history.
-                if (!updated) {
+                if (s.indexOf(c, root) != SIZE_MAX) {
+                    s.updateMessage(c, root, [&](model::Message &r) {
+                        r.replyCount  = acc->rootMsg.replyCount;
+                        r.latestReply = acc->rootMsg.latestReply;
+                        r.replyUsers  = acc->rootMsg.replyUsers;
+                        r.threadTs    = root;
+                    });
+                } else {
+                    // The parent can predate loaded history.
                     if (usersLoaded)
                         fetchUserIfNeeded(acc->rootMsg.user);
                     s.setThreadRoot(c, root, std::move(acc->rootMsg));

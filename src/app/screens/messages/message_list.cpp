@@ -1592,7 +1592,7 @@ void MessageList::showConversation(ConvRef conv) {
     scheduleEdgeCheck();
 }
 
-void MessageList::showThread(ConvRef conv, Ts root) {
+void MessageList::showThread(ConvRef conv, Ts root, bool refresh) {
     hideToolbar();
     saveAnchor();
     _selAnchor = _selFocus = {};
@@ -1602,7 +1602,8 @@ void MessageList::showThread(ConvRef conv, Ts root) {
     _conv          = conv;
     _root          = root;
     _jumpTs        = 0;
-    _loadingThread = false;
+    _loadingThread         = conv != model::kNoConv && root && !_ctx.store().replies(conv, root);
+    _threadLoadPending     = _loadingThread || (refresh && conv != model::kNoConv && root);
     const uint64_t loadGen = ++_threadLoadGen;
     // A thread reads from its root down; a short one sits at the top.
     _list->setBottomAligned(false);
@@ -1610,19 +1611,17 @@ void MessageList::showThread(ConvRef conv, Ts root) {
     resetRows();
     subscribe();
     updateTyping();
-    if (conv != model::kNoConv && !_ctx.store().replies(conv, root)) {
-        // The ring shows, not the root, until the thread's page is in.
-        _loadingThread = true;
-        rebuild(false);
-        resetRows();
+    if (_threadLoadPending) {
         std::weak_ptr<char> alive = _alive;
         _ctx.backend.loadThread(
             conv, root, [this, alive, conv, root, loadGen](bool ok, const std::string &) {
                 if (alive.expired() || loadGen != _threadLoadGen || conv != _conv || root != _root)
                     return;
-                _loadingThread = false;
-                rebuild(false);
-                resetRows();
+                _threadLoadPending = false;
+                if (std::exchange(_loadingThread, false)) {
+                    rebuild(false);
+                    resetRows();
+                }
                 if (!ok || !applyJump())
                     _jumpTs = 0;
                 scheduleEdgeCheck();
@@ -3099,7 +3098,7 @@ void MessageList::jumpTo(Ts ts) {
     // target, so a deleted message stops the walk there. A thread's replies
     // come in one load (Saved messages jumps to a reply).
     if (threadMode()) {
-        if (!_loadingThread)
+        if (!_threadLoadPending)
             _jumpTs = 0;
         return;
     }

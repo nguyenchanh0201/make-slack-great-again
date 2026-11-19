@@ -725,8 +725,16 @@ void Store::addMessage(ConvRef ref, Message m) {
 
 bool Store::updateMessage(ConvRef ref, Ts ts, const std::function<void(Message &)> &fn) {
     Message *m = findMessage(ref, ts);
-    if (!m)
-        return false;
+    if (!m) {
+        if (ref >= _convs.size())
+            return false;
+        Thread *t = findThread(_convs[ref], ts);
+        if (!t || !t->rootMessage)
+            return false;
+        fn(*t->rootMessage);
+        emit({ChangeKind::Update, ref, ts, ts});
+        return true;
+    }
     fn(*m);
     emit({ChangeKind::Update, ref, m->isReply() ? m->threadTs : 0, ts});
     return true;
