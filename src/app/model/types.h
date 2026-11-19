@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -250,6 +251,7 @@ struct Message {
 struct Thread {
     Ts                   root = 0;
     std::vector<Message> replies; // oldest first
+    std::optional<Message> rootMessage; // fetched while the parent is outside loaded history
 };
 
 // A new metadata field also goes into store.cpp's sameMeta (addConversation

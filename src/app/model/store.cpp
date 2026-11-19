@@ -492,7 +492,7 @@ std::vector<Message> *Store::listFor(Conversation &c, Ts thread, bool create) {
         return &t->replies;
     if (!create)
         return nullptr;
-    c.threads.push_back(Thread{thread, {}});
+    c.threads.push_back(Thread{thread, {}, {}});
     return &c.threads.back().replies;
 }
 
@@ -528,6 +528,36 @@ Message *Store::findMessage(ConvRef ref, Ts ts) {
 
 const Message *Store::findMessage(ConvRef ref, Ts ts) const {
     return const_cast<Store *>(this)->findMessage(ref, ts);
+}
+
+const Message *Store::threadRoot(ConvRef ref, Ts root) const {
+    if (ref >= _convs.size() || !root)
+        return nullptr;
+    const Conversation &c = _convs[ref];
+    const auto parent = std::lower_bound(
+        c.messages.begin(), c.messages.end(), root, [](const Message &message, Ts ts) {
+            return message.ts < ts;
+        }
+    );
+    if (parent != c.messages.end() && parent->ts == root)
+        return &*parent;
+    const Thread *t = findThread(c, root);
+    return t && t->rootMessage ? &*t->rootMessage : nullptr;
+}
+
+void Store::setThreadRoot(ConvRef ref, Ts root, Message message) {
+    if (ref >= _convs.size() || !root || message.ts != root)
+        return;
+    Conversation &c = _convs[ref];
+    message.threadTs = root;
+    if (Thread *t = findThread(c, root)) {
+        if (t->rootMessage && *t->rootMessage == message)
+            return;
+        t->rootMessage = std::move(message);
+    } else {
+        c.threads.push_back(Thread{root, {}, std::move(message)});
+    }
+    emit({ChangeKind::Update, ref, root, root});
 }
 
 const std::vector<Message> *Store::replies(ConvRef ref, Ts root) const {
@@ -703,10 +733,18 @@ bool Store::updateMessage(ConvRef ref, Ts ts, const std::function<void(Message &
 }
 
 bool Store::removeMessage(ConvRef ref, Ts ts) {
-    Message *m = findMessage(ref, ts);
-    if (!m)
+    if (ref >= _convs.size())
         return false;
-    Conversation &c      = _convs[ref];
+    Message *m = findMessage(ref, ts);
+    Conversation &c = _convs[ref];
+    if (!m) {
+        if (!std::erase_if(c.threads, [ts](const Thread &t) {
+                return t.root == ts && t.rootMessage.has_value();
+            }))
+            return false;
+        emit({ChangeKind::Remove, ref, ts, ts});
+        return true;
+    }
     const Ts      thread = m->isReply() ? m->threadTs : 0;
     auto         &list   = *listFor(c, thread, false);
     list.erase(lowerByTs(list, ts));

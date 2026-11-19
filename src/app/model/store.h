@@ -165,6 +165,9 @@ public:
     // A message by ts, top-level or in any loaded thread; null if absent.
     Message                    *findMessage(ConvRef c, Ts ts);
     const Message              *findMessage(ConvRef c, Ts ts) const;
+    // A thread's parent, preferring the message in loaded channel history.
+    const Message              *threadRoot(ConvRef c, Ts root) const;
+    void                        setThreadRoot(ConvRef c, Ts root, Message message);
     // Replies of a loaded thread (null if never loaded).
     const std::vector<Message> *replies(ConvRef c, Ts root) const;
     // Position of ts in the top-level list (thread == 0) or in a thread;

@@ -432,6 +432,38 @@ TEST("store: thread replies update their root") {
     CHECK((r.log[1].kind == ChangeKind::Update && r.log[1].ts == 100));
 }
 
+TEST("store: fetched thread parents stay outside channel history") {
+    Fixture f;
+    Conversation other;
+    other.id = "C2";
+    const ConvRef c2 = f.s.addConversation(std::move(other));
+    f.s.addPage(f.c, page({400}, f.mira));
+    Recorder r;
+    f.s.observe(f.c, r.fn());
+    f.s.setThreadRoot(f.c, 100, msg(100, f.mira, "fetched"));
+    f.s.setThreadRoot(f.c, 200, msg(200, f.mira, "second thread"));
+    f.s.setThreadRoot(c2, 100, msg(100, f.me, "different channel"));
+    REQUIRE(r.log.size() == 2);
+    CHECK(r.log.front().kind == ChangeKind::Update && r.log.front().thread == 100);
+    REQUIRE(f.s.threadRoot(f.c, 100));
+    REQUIRE(f.s.threadRoot(f.c, 200));
+    REQUIRE(f.s.threadRoot(c2, 100));
+    CHECK_STR(f.s.threadRoot(f.c, 100)->text, "fetched");
+    CHECK_STR(f.s.threadRoot(f.c, 200)->text, "second thread");
+    CHECK_STR(f.s.threadRoot(c2, 100)->text, "different channel");
+    CHECK(f.s.findMessage(f.c, 100) == nullptr);
+    CHECK(f.s.conversation(f.c).messages.size() == 1);
+
+    f.s.addPage(f.c, page({100}, f.mira));
+    REQUIRE(f.s.updateMessage(f.c, 100, [](Message &m) { m.text = "from history"; }));
+    CHECK_STR(f.s.threadRoot(f.c, 100)->text, "from history");
+    CHECK(f.s.removeMessage(f.c, 100));
+    CHECK(f.s.threadRoot(f.c, 100) == nullptr);
+    CHECK(f.s.removeMessage(f.c, 200));
+    CHECK(f.s.threadRoot(f.c, 200) == nullptr);
+    CHECK(f.s.threadRoot(c2, 100) != nullptr);
+}
+
 TEST("store: reactions, updates and removal notify with the ts") {
     Fixture f;
     f.s.addPage(f.c, page({100, 200}, f.mira));

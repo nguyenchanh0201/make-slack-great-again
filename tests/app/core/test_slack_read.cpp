@@ -883,10 +883,28 @@ TEST("slack read: an open thread whose root left the head page asks for its root
                "latest_reply": "1700000300.000000"},
               {"type": "message", "ts": "1700000300.000000", "thread_ts": "1700000200.000200",
                "user": "UJONAS", "text": "one"}]}})");
-    bool loaded = false;
-    e.be->loadThread(c, root, [&](bool, const std::string &) { loaded = true; });
-    REQUIRE(pumpUntil([&] { return loaded; }));
+    REQUIRE(e.history(c, 0));
+    const Ts newer = model::parseTs("1700009000.000000");
+    const auto unread = e.store.conversation(c).unread;
+    REQUIRE(e.store.conversation(c).messages.size() == 1);
+    REQUIRE(e.store.conversation(c).messages.front().ts == newer);
+    REQUIRE(e.store.conversation(c).hasMoreBefore);
+    bool loaded = false, ok = false;
+    e.be->loadThread(c, root, [&](bool success, const std::string &) {
+        loaded = true;
+        ok = success;
+    });
+    REQUIRE(pumpUntil([&] { return loaded; }) && ok);
     REQUIRE(e.store.replies(c, root) && e.store.replies(c, root)->size() == 1);
+    REQUIRE(e.store.threadRoot(c, root));
+    CHECK_STR(e.store.threadRoot(c, root)->text, "root");
+    CHECK(e.store.findMessage(c, root) == nullptr);
+    const auto &conv = e.store.conversation(c);
+    REQUIRE(conv.messages.size() == 1);
+    CHECK(conv.messages.front().ts == newer);
+    CHECK(conv.hasMoreBefore);
+    CHECK(conv.latest == newer);
+    CHECK(conv.unread == unread);
     e.be->setActiveConversation(c, root);
     // ~20 polls of the open chat: each asks for the root alone, none
     // re-reads the thread while latest_reply stays where we are.

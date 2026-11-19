@@ -2516,14 +2516,20 @@ void SlackBackend::Read::loadThreadPages(ConvRef c, Ts root, bool live, Backend:
             }
             if (acc->rootLastRead > 0)
                 threadRead(c, root, acc->rootLastRead);
-            // The root stays in the channel list: refresh its thread fields.
-            if (acc->haveRoot)
-                s.updateMessage(c, root, [&](model::Message &r) {
+            if (acc->haveRoot) {
+                const bool updated = s.updateMessage(c, root, [&](model::Message &r) {
                     r.replyCount  = acc->rootMsg.replyCount;
                     r.latestReply = acc->rootMsg.latestReply;
                     r.replyUsers  = acc->rootMsg.replyUsers;
                     r.threadTs    = root;
                 });
+                // A search can open a thread whose parent predates loaded history.
+                if (!updated) {
+                    if (usersLoaded)
+                        fetchUserIfNeeded(acc->rootMsg.user);
+                    s.setThreadRoot(c, root, std::move(acc->rootMsg));
+                }
+            }
             resolveAuthors(acc->replies);
             const std::vector<model::Message> *have = s.replies(c, root);
             // Every page was read, so the set is complete: a reply we hold
